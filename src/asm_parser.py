@@ -4,6 +4,7 @@ Python parser for RISC-V Assembly files
 __author__ = "Nikolaos Kostakis"
 __version__ = "1.0"
 
+import os
 import sys
 import pprint
 import csv
@@ -106,6 +107,20 @@ def setupArgeparse() -> argparse.ArgumentParser:
     )
 
     return parser
+
+def out_path(fileName: str) -> str:
+    '''
+    Resolve a filename to the project's out/ directory, creating it if needed.
+
+    :param fileName: Name of the file to resolve
+    :type fileName: str
+    :return: Absolute path to the file inside out/
+    :rtype: str
+    '''
+    outDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "out")
+    os.makedirs(outDir, exist_ok=True)
+
+    return os.path.join(outDir, fileName)
 
 def get_filePointer(fileName:str) -> TextIOWrapper:
     '''
@@ -215,7 +230,7 @@ def save_intructions(instructions:dict, output_name: str | None) -> None:
     if output_name is not None:
         fileName = f"{output_name}.csv"
 
-    with open(fileName, 'w') as fp:
+    with open(out_path(fileName), 'w') as fp:
         csvWriter = csv.writer(fp)
         csvWriter.writerow(instructions.keys())
         csvWriter.writerow(instructions.values())
@@ -239,6 +254,7 @@ def save_isa_sets_to_csv(isa_sets: dict, output_name: str | None) -> None:
     fileName = "isa_sets.csv"
     if output_name is not None:
         fileName = f"{output_name}_isa_sets.csv"
+    fileName = out_path(fileName)
 
     # Build lists for CSV rows
     names = []
@@ -606,7 +622,7 @@ def extractInstr(instrList: list, filePointer:TextIOWrapper, output_name: str | 
     if output_name is not None:
         fileName = f"{output_name}.asm"
 
-    fp = open(fileName, 'w')
+    fp = open(out_path(fileName), 'w')
 
     filePointer.seek(0)
 
