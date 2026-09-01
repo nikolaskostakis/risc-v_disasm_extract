@@ -1,8 +1,8 @@
 """
-Python parser for RISC-V Assembly files
+RISC-V instruction counter and ISA extension profiler
 """
 __author__ = "Nikolaos Kostakis"
-__version__ = "1.0"
+__version__ = "1.2"
 
 import os
 import sys
@@ -61,20 +61,32 @@ def setupArgeparse() -> argparse.ArgumentParser:
     Set up and configure the command-line argument parser.
     
     Creates an ArgumentParser with the following arguments:
-    - input_file: Required positional argument for the assembly file to parse
+    - input_file: Positional argument for the assembly file to parse (not
+      required when -list-sets is given)
     - -o/--output-name: Optional base name for output files
     - -csv: Flag to save raw instruction counts to CSV
     - -e/--extract: List of instructions to extract to a separate file
+    - -es/--extract-set: List of ISA sets/subsets to extract to a separate file
     - -isa-csv: Flag to save ISA instruction set counts to CSV
-    
+    - -list-sets: Flag to print the known ISA sets/subsets and exit
+    - --version: Flag to print the tool's version and exit
+
     :return: Configured argument parser
     :rtype: argparse.ArgumentParser
     '''
-    parser = argparse.ArgumentParser(description="RISC-V Assembly Parser")
+    parser = argparse.ArgumentParser(description="RISC-V Instruction Counter and ISA Extension Profiler")
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}"
+    )
 
     parser.add_argument(
         "input_file",
         type=str,
+        nargs="?",
+        default=None,
         help="Input Assembly file"
     )
 
@@ -101,9 +113,23 @@ def setupArgeparse() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "-es", "--extract-set",
+        nargs="*",
+        metavar="set1, set2,",
+        help="ISA sets/subsets to extract, e.g. rv32I, rv32I_loads, rv32A",
+        default=[]
+    )
+
+    parser.add_argument(
         "-isa-csv",
         action="store_true",
         help="Save ISA instruction sets to CSV file"
+    )
+
+    parser.add_argument(
+        "-list-sets", "--list-sets",
+        action="store_true",
+        help="Print the known ISA sets/subsets and exit"
     )
 
     return parser
@@ -277,19 +303,16 @@ def save_isa_sets_to_csv(isa_sets: dict, output_name: str | None) -> None:
 
     return
 
-def save_instuction_sets(instructions:dict) -> dict:
+def get_isa_lists() -> dict[str, list[str]]:
     '''
-    Categorize instructions into RISC-V ISA extension sets and count occurrences.
-    
-    Takes a dictionary of instruction counts and categorizes each instruction
-    into its corresponding RISC-V ISA extension (RV32I, RV32M, RV32A, etc.).
-    Instructions that don't match any known ISA set are collected under "unknown".
-    
-    :param instructions: Dictionary of instruction counts from parsing
-    :type instructions: dict
-    :return: Dictionary with ISA set names as keys and their total counts as values.
-             Unknown instructions are stored as a nested dict under "unknown" key.
-    :rtype: dict
+    Build the RISC-V ISA extension set/subset instruction lists.
+
+    Each key is either a whole ISA extension (e.g. "rv32A") or one of its
+    functional subsets (e.g. "rv32I_loads", "rv32M_mul"), mapped to the
+    instruction mnemonics it contains.
+
+    :return: Mapping of ISA set/subset names to their instruction mnemonics
+    :rtype: dict[str, list[str]]
     '''
     # RV32I Base Integer Instructions (grouped by functional category)
     # Logic operations (and/or/xor and their immediate forms)
@@ -558,7 +581,7 @@ def save_instuction_sets(instructions:dict) -> dict:
         "rdcycleh", "rdtimeh", "rdinstreth"
     ]
 
-    isa_lists = {
+    return {
         # RV32I grouped by functional category
         "rv32I_logic": rv32I_logic,
         "rv32I_addsub": rv32I_addsub,
@@ -582,6 +605,22 @@ def save_instuction_sets(instructions:dict) -> dict:
         "zicntr": zicntr,
     }
 
+def save_instuction_sets(instructions: dict) -> dict:
+    '''
+    Categorize instructions into RISC-V ISA extension sets and count occurrences.
+
+    Takes a dictionary of instruction counts and categorizes each instruction
+    into its corresponding RISC-V ISA extension (RV32I, RV32M, RV32A, etc.).
+    Instructions that don't match any known ISA set are collected under "unknown".
+
+    :param instructions: Dictionary of instruction counts from parsing
+    :type instructions: dict
+    :return: Dictionary with ISA set names as keys and their total counts as values.
+             Unknown instructions are stored as a nested dict under "unknown" key.
+    :rtype: dict
+    '''
+    isa_lists = get_isa_lists()
+
     # initialise counters for every set
     isaSets: dict[str, int] = {name: 0 for name in isa_lists}
     unknown: dict[str, int] = {}
@@ -601,6 +640,48 @@ def save_instuction_sets(instructions:dict) -> dict:
         isaSets["unknown"] = unknown
 
     return isaSets
+
+def get_setInstr(setNames: list, isa_lists: dict) -> list[str]:
+    '''
+    Resolve ISA extension set/subset names to the instruction mnemonics they contain.
+
+    Matching is case-insensitive. A name may refer to an exact set/subset key
+    (e.g. "rv32A", "rv32I_loads") or to a whole set made up of several
+    functional subsets (e.g. "rv32I" expands to every rv32I_* subset).
+    Names that match nothing are logged as warnings and skipped.
+
+    :param setNames: ISA set or subset names to resolve
+    :type setNames: list
+    :param isa_lists: Mapping of set/subset names to instruction mnemonics
+    :type isa_lists: dict
+    :return: Deduplicated list of instruction mnemonics from the matched sets
+    :rtype: list[str]
+    '''
+    lowerKeys = {key.lower(): key for key in isa_lists}
+
+    instrs: list[str] = []
+    seen: set[str] = set()
+
+    for name in setNames:
+        lname = name.lower()
+
+        if lname in lowerKeys:
+            matchedKeys = [lowerKeys[lname]]
+        else:
+            prefix = f"{lname}_"
+            matchedKeys = [key for lkey, key in lowerKeys.items() if lkey.startswith(prefix)]
+
+        if not matchedKeys:
+            logging.warning(f"ISA set \"{name}\" does not match any known set or subset...")
+            continue
+
+        for key in matchedKeys:
+            for instr in isa_lists[key]:
+                if instr not in seen:
+                    seen.add(instr)
+                    instrs.append(instr)
+
+    return instrs
 
 def extractInstr(instrList: list, filePointer:TextIOWrapper, output_name: str | None = None):
     '''
@@ -652,17 +733,29 @@ def main():
     7. Optionally extracts specific instructions to a file
     
     Command-line usage:
-    python asm_parser.py input_file [options]
+    python isa_profiler.py input_file [options]
     
     Options:
     -o OUTPUT_NAME    Base name for output files
     -csv              Save raw instruction counts to CSV
     -isa-csv          Save ISA instruction set counts to CSV
     -e INSTR...       Extract specific instructions to file
+    -es SET...        Extract instructions from ISA sets/subsets to file
+    -list-sets        Print the known ISA sets/subsets and exit
+    --version         Print the tool's version and exit
     '''
     logger = setupLogger()
     parser = setupArgeparse()
     args = parser.parse_args()
+
+    if args.list_sets:
+        isa_lists = get_isa_lists()
+        for name in sorted(isa_lists):
+            print(f"{name} ({len(isa_lists[name])} instructions)")
+        return
+
+    if args.input_file is None:
+        parser.error("input_file is required")
 
     filePointer = get_filePointer(args.input_file)
     instructions = get_asmInstr(filePointer)
@@ -676,8 +769,17 @@ def main():
     if args.csv == True:
         save_intructions(instructions, output_name)
 
+    iList = []
     if len(args.extract) != 0:
-        iList = get_splitInstr(instructions, args.extract)
+        iList += get_splitInstr(instructions, args.extract)
+
+    if len(args.extract_set) != 0:
+        setInstr = get_setInstr(args.extract_set, get_isa_lists())
+        iList += [instr for instr in setInstr if instr in instructions]
+
+    iList = list(dict.fromkeys(iList))
+
+    if len(args.extract) != 0 or len(args.extract_set) != 0:
         if len(iList) == 0:
             logger.error('No valid instructions to be extracted')
             return
