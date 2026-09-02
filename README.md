@@ -36,7 +36,7 @@ make help                                       # describe targets and variables
 
 ```bash
 src/disasm.sh <elf_file> [output_name]  # or -h/--help, -v/--version, -c/--check
-python src/isa_profiler.py <input_file> [options]
+python src/isa_profiler.py <input_file> [options]  # or -h/--help, -v/--version
 ```
 
 #### isa_profiler.py options
@@ -44,13 +44,16 @@ python src/isa_profiler.py <input_file> [options]
 | Flag | Description |
 | --- | --- |
 | `input_file` | Path to the input assembly/disassembly file (required) |
+| `-h`, `--help` | Show usage and exit |
 | `-o`, `--output-name` | Base name used for generated output files |
 | `-csv` | Save raw instruction counts to a CSV file |
 | `-isa-csv` | Save per-ISA-extension instruction counts to a CSV file |
 | `-e`, `--extract` | One or more instruction mnemonics to extract to `<output_name>.asm` (or `extraction.asm` if `-o` is not given) |
 | `-es`, `--extract-set` | One or more ISA sets/subsets to extract (e.g. `rv32I`, `rv32I_loads`, `rv32A`), combinable with `-e`; case-insensitive, matches an exact set/subset or a whole set's subsets by prefix |
-| `-list-sets`, `--list-sets` | Print the known ISA sets/subsets and exit (`input_file` not required) |
-| `--version` | Print the tool's version and exit (`input_file` not required) |
+| `-eh`, `--extract-hex` | With `-e`/`-es`: also write `<output_name>.mem`, one extracted instruction's 4 bytes per line (little-endian), in the same order as the `.asm` extraction. Warns and does nothing if used without `-e`/`-es` |
+| `-list-sets` | Print the known ISA sets/subsets and exit, with subsets tab-indented beneath their whole set (`input_file` not required) |
+| `-list-instr` | One or more ISA sets/subsets; print the instruction mnemonics they contain (one per line) and exit — same resolution as `-es` (whole-set expansion, case-insensitive, deduplicated), but a static lookup, not filtered by any file (`input_file` not required) |
+| `-v`, `--version` | Print the tool's version and exit (`input_file` not required) |
 
 ### Examples
 
@@ -96,6 +99,12 @@ Extract just the RV32I load instructions:
 python src/isa_profiler.py out/test1.asm -es rv32I_loads
 ```
 
+List which instructions belong to `rv32M` and `rv32I_shifts` (no input file needed):
+
+```bash
+python src/isa_profiler.py -list-instr rv32M rv32I_shifts
+```
+
 ## Input format
 
 `isa_profiler.py` expects objdump-style disassembly lines, where each line is whitespace-separated as:
@@ -123,10 +132,11 @@ A line is only treated as an instruction if it has more than two whitespace-sepa
 All generated files are written to `out/`.
 
 - **`<output_name>.asm`** (or `<elf_basename>.asm` by default) — readable disassembly, from `disasm.sh`.
-- **`<output_name>.hexdump.asm`** — byte-per-line hex dump for use with Verilog's `$readmemh`, from `disasm.sh`.
+- **`<output_name>.mem`** — byte-per-line hex dump for use with Verilog's `$readmemh`, from `disasm.sh`.
 - **`<output_name>.csv`** (or `instructions.csv` by default) — two rows: instruction mnemonics and their counts, written when `-csv` is passed to `isa_profiler.py`.
 - **`<output_name>_isa_sets.csv`** (or `isa_sets.csv` by default) — two rows: ISA extension/unknown-instruction names and their counts, written when `-isa-csv` is passed. Instructions that don't match a known ISA set are listed individually under an `unknown_` prefix.
 - **`<output_name>.asm`** (or `extraction.asm` by default) — lines containing the requested instructions (via `-e`/`--extract`), one per line.
+- **`<output_name>.mem`** (or `extraction.mem` by default) — one extracted instruction's 4 raw bytes per line, little-endian, written when `-eh`/`--extract-hex` is passed alongside `-e`/`-es`. Note this shares its default naming pattern with `disasm.sh`'s own `<output_name>.mem` above — use distinct `-o`/`NAME` values (or separate `DEST` folders) to avoid overwriting one with the other.
 
 ## License
 

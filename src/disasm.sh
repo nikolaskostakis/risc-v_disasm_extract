@@ -24,7 +24,7 @@ print_help() {
     echo "Usage: $0 <elf_file> [output_name]"
     echo ""
     echo "Disassembles <elf_file> and generates a hex dump of it, writing"
-    echo "output_name.asm and output_name.hexdump.asm to out/."
+    echo "output_name.asm and output_name.mem to out/."
     echo "output_name defaults to the basename of <elf_file>."
     echo ""
     echo "Requires the ${RISCV} toolchain (objdump, objcopy, readelf) and hexdump on PATH."
@@ -91,7 +91,7 @@ OUT_DIR="$SCRIPT_DIR/../out"
 mkdir -p "$OUT_DIR"
 
 ASM_FILE="$OUT_DIR/${OUTPUT_NAME}.asm"
-HEXDUMP_FILE="$OUT_DIR/${OUTPUT_NAME}.hexdump.asm"
+HEXDUMP_FILE="$OUT_DIR/${OUTPUT_NAME}.mem"
 BIN_FILE="$OUT_DIR/${OUTPUT_NAME}.bin"
 
 echo "Disassembling '$ELF_FILE' -> '$ASM_FILE'"

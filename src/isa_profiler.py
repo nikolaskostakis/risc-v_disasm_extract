@@ -2,11 +2,10 @@
 RISC-V instruction counter and ISA extension profiler
 """
 __author__ = "Nikolaos Kostakis"
-__version__ = "1.2"
+__version__ = "1.3"
 
 import os
 import sys
-import pprint
 import csv
 import logging
 import argparse
@@ -19,8 +18,8 @@ def setupLogger() -> Logger:
     '''
     Set up and configure the logging system with colored output.
     
-    Creates a logger with a custom ANSI color formatter that provides
-    colored output for different log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+    Creates a logger with a custom ANSI color formatter that provides colored
+    output for different log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     The logger is configured to output to stdout with DEBUG level.
     
     :return: Configured logger instance
@@ -52,7 +51,9 @@ def setupLogger() -> Logger:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG) # DEBUG INFO WARNING ERROR CRITICAL
-    #logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
+    #logging.basicConfig(
+    #    level=logging.DEBUG, format='%(levelname)s: %(message)s'
+    #)
     
     return logger
 
@@ -62,22 +63,29 @@ def setupArgeparse() -> argparse.ArgumentParser:
     
     Creates an ArgumentParser with the following arguments:
     - input_file: Positional argument for the assembly file to parse (not
-      required when -list-sets is given)
+      required when -list-sets or -list-instr is given)
     - -o/--output-name: Optional base name for output files
     - -csv: Flag to save raw instruction counts to CSV
     - -e/--extract: List of instructions to extract to a separate file
-    - -es/--extract-set: List of ISA sets/subsets to extract to a separate file
+    - -es/--extract-set: List of ISA sets/subsets to extract to a
+      separate file
+    - -eh/--extract-hex: Flag to also write a hexdump of the extracted
+      instructions (warns and does nothing without -e/-es)
     - -isa-csv: Flag to save ISA instruction set counts to CSV
     - -list-sets: Flag to print the known ISA sets/subsets and exit
+    - -list-instr: List of ISA sets/subsets whose instructions should be
+      printed, one per line, and exit
     - --version: Flag to print the tool's version and exit
 
     :return: Configured argument parser
     :rtype: argparse.ArgumentParser
     '''
-    parser = argparse.ArgumentParser(description="RISC-V Instruction Counter and ISA Extension Profiler")
+    parser = argparse.ArgumentParser(
+        description="RISC-V Instruction Counter and ISA Extension Profiler"
+    )
 
     parser.add_argument(
-        "--version",
+        "-v", "--version",
         action="version",
         version=f"%(prog)s {__version__}"
     )
@@ -121,20 +129,36 @@ def setupArgeparse() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "-eh", "--extract-hex",
+        action="store_true",
+        help="Also write a hexdump of the extracted instructions (with -e/-es)"
+    )
+
+    parser.add_argument(
         "-isa-csv",
         action="store_true",
         help="Save ISA instruction sets to CSV file"
     )
 
     parser.add_argument(
-        "-list-sets", "--list-sets",
+        "-list-sets",
         action="store_true",
         help="Print the known ISA sets/subsets and exit"
     )
 
+    parser.add_argument(
+        "-list-instr",
+        nargs="*",
+        metavar="set1, set2,",
+        default=None,
+        help="Print the instructions in the given ISA sets/subsets and exit"
+    )
+
     return parser
 
-def out_path(fileName: str) -> str:
+def out_path(
+    fileName: str
+) -> str:
     '''
     Resolve a filename to the project's out/ directory, creating it if needed.
 
@@ -143,7 +167,9 @@ def out_path(fileName: str) -> str:
     :return: Absolute path to the file inside out/
     :rtype: str
     '''
-    outDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "out")
+    outDir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "out"
+    )
     os.makedirs(outDir, exist_ok=True)
 
     return os.path.join(outDir, fileName)
@@ -170,20 +196,24 @@ def get_filePointer(fileName:str) -> TextIOWrapper:
     
     return filePointer
 
-def get_asmInstr(filePointer:TextIOWrapper) -> dict:
+def get_asmInstr(
+    filePointer:TextIOWrapper
+) -> dict:
     '''
     Parse assembly instructions from the file and count their occurrences.
     
-    Reads through the assembly file line by line, extracts instruction mnemonics,
-    and counts their frequency. Filters out invalid instructions based on:
+    Reads through the assembly file line by line, extracts instruction
+    mnemonics, and counts their frequency. Filters out invalid instructions
+    based on:
     - Instructions that are all hexadecimal digits
     - Instructions starting with '.', '(', '@', or ')'
     - Instructions ending with '.'
     - Lines that don't have the expected format (address + instruction)
-    
+
     :param filePointer: Open file pointer to the assembly file
     :type filePointer: TextIOWrapper
-    :return: Dictionary mapping instruction mnemonics to their counts, sorted alphabetically
+    :return: Dictionary mapping instruction mnemonics to their counts,
+             sorted alphabetically
     :rtype: dict
     '''
 
@@ -211,17 +241,26 @@ def get_asmInstr(filePointer:TextIOWrapper) -> dict:
                     instructions[instr] = instructions[instr] + 1
 
     
-    instructions = {k: v for k, v in sorted(instructions.items(), key=lambda item: item[0])}
+    instructions = {
+        k: v for k, v in sorted(
+            instructions.items(), key=lambda item: item[0]
+        )
+    }
 
     return instructions
 
-def get_splitInstr(instructions: dict, instrList: list) -> list[str]:
+def get_splitInstr(
+    instructions: dict,
+    instrList: list
+) -> list[str]:
     '''
-    Filter a list of instructions to only include those present in the parsed file.
-    
+    Filter a list of instructions to only include those present in the
+    parsed file.
+
     Takes a list of instruction names and removes any that are not found
-    in the parsed instructions dictionary, logging warnings for missing instructions.
-    
+    in the parsed instructions dictionary, logging warnings for missing
+    instructions.
+
     :param instructions: Dictionary of parsed instructions and their counts
     :type instructions: dict
     :param instrList: List of instruction names to filter
@@ -233,12 +272,17 @@ def get_splitInstr(instructions: dict, instrList: list) -> list[str]:
 
     for instr in instrList:
         if instr not in instructions:
-            logging.warning(f"Instruction \"{instr}\" is not present in the file...")
+            logging.warning(
+                f"Instruction \"{instr}\" is not present in the file..."
+            )
             newlist.remove(instr)
     
     return newlist
 
-def save_intructions(instructions:dict, output_name: str | None) -> None:
+def save_intructions(
+    instructions:dict,
+    output_name: str | None
+) -> None:
     '''
     Save raw instruction counts to a CSV file.
     
@@ -263,7 +307,10 @@ def save_intructions(instructions:dict, output_name: str | None) -> None:
 
     return
 
-def save_isa_sets_to_csv(isa_sets: dict, output_name: str | None) -> None:
+def save_isa_sets_to_csv(
+    isa_sets: dict,
+    output_name: str | None
+) -> None:
     '''
     Save ISA instruction set counts to a CSV file.
     
@@ -309,7 +356,10 @@ def get_isa_lists() -> dict[str, list[str]]:
 
     Each key is either a whole ISA extension (e.g. "rv32A") or one of its
     functional subsets (e.g. "rv32I_loads", "rv32M_mul"), mapped to the
-    instruction mnemonics it contains.
+    instruction mnemonics it contains. Subset keys must be named
+    "<WholeSet>_<subset>", with no underscore in <WholeSet> itself --
+    get_setInstr()'s prefix matching and print_isa_lists()'s grouping both
+    split on the first underscore to recover the whole-set name.
 
     :return: Mapping of ISA set/subset names to their instruction mnemonics
     :rtype: dict[str, list[str]]
@@ -403,18 +453,21 @@ def get_isa_lists() -> dict[str, list[str]]:
         
         # With acquire (aq) ordering
         "lr.w.aq", "sc.w.aq",
-        "amoswap.w.aq", "amoadd.w.aq", "amoxor.w.aq", "amoand.w.aq", "amoor.w.aq",
-        "amomin.w.aq", "amomax.w.aq", "amominu.w.aq", "amomaxu.w.aq",
-        
+        "amoswap.w.aq", "amoadd.w.aq", "amoxor.w.aq", "amoand.w.aq",
+        "amoor.w.aq", "amomin.w.aq", "amomax.w.aq", "amominu.w.aq",
+        "amomaxu.w.aq",
+
         # With release (rl) ordering
         "lr.w.rl", "sc.w.rl",
-        "amoswap.w.rl", "amoadd.w.rl", "amoxor.w.rl", "amoand.w.rl", "amoor.w.rl",
-        "amomin.w.rl", "amomax.w.rl", "amominu.w.rl", "amomaxu.w.rl",
-        
+        "amoswap.w.rl", "amoadd.w.rl", "amoxor.w.rl", "amoand.w.rl",
+        "amoor.w.rl", "amomin.w.rl", "amomax.w.rl", "amominu.w.rl",
+        "amomaxu.w.rl",
+
         # With acquire-release (aqrl) ordering
         "lr.w.aqrl", "sc.w.aqrl",
-        "amoswap.w.aqrl", "amoadd.w.aqrl", "amoxor.w.aqrl", "amoand.w.aqrl", "amoor.w.aqrl",
-        "amomin.w.aqrl", "amomax.w.aqrl", "amominu.w.aqrl", "amomaxu.w.aqrl"
+        "amoswap.w.aqrl", "amoadd.w.aqrl", "amoxor.w.aqrl",
+        "amoand.w.aqrl", "amoor.w.aqrl", "amomin.w.aqrl", "amomax.w.aqrl",
+        "amominu.w.aqrl", "amomaxu.w.aqrl"
     ]
 
     # RV32F Single-Precision Floating-Point Extension
@@ -605,18 +658,58 @@ def get_isa_lists() -> dict[str, list[str]]:
         "zicntr": zicntr,
     }
 
-def save_instuction_sets(instructions: dict) -> dict:
+def print_isa_lists(isa_lists: dict[str, list[str]]) -> None:
     '''
-    Categorize instructions into RISC-V ISA extension sets and count occurrences.
+    Print the known ISA sets/subsets, one whole set per line with its
+    functional subsets (if any) tab-indented beneath it.
+
+    A key with an underscore (e.g. "rv32I_loads") is treated as a subset
+    of the whole set named by the part before the first underscore (e.g.
+    "rv32I"); its instruction count is rolled up into that whole set's
+    total. A key with no underscore (e.g. "rv32A") has no subsets and is
+    printed on its own.
+
+    :param isa_lists: Mapping of set/subset names to instruction mnemonics
+    :type isa_lists: dict[str, list[str]]
+    '''
+    subsetsOf: dict[str, list[str]] = {}
+    tops: set[str] = set()
+
+    for name in isa_lists:
+        if "_" in name:
+            whole = name.split("_", 1)[0]
+            subsetsOf.setdefault(whole, []).append(name)
+            tops.add(whole)
+        else:
+            tops.add(name)
+
+    for name in sorted(tops):
+        if name in subsetsOf:
+            subs = sorted(subsetsOf[name])
+            total = sum(len(isa_lists[sub]) for sub in subs)
+            print(f"{name} ({total} instructions)")
+            for sub in subs:
+                print(f"\t{sub} ({len(isa_lists[sub])} instructions)")
+        else:
+            print(f"{name} ({len(isa_lists[name])} instructions)")
+
+def save_instuction_sets(
+    instructions: dict
+) -> dict:
+    '''
+    Categorize instructions into RISC-V ISA extension sets and count
+    occurrences.
 
     Takes a dictionary of instruction counts and categorizes each instruction
     into its corresponding RISC-V ISA extension (RV32I, RV32M, RV32A, etc.).
-    Instructions that don't match any known ISA set are collected under "unknown".
+    Instructions that don't match any known ISA set are collected under
+    "unknown".
 
     :param instructions: Dictionary of instruction counts from parsing
     :type instructions: dict
-    :return: Dictionary with ISA set names as keys and their total counts as values.
-             Unknown instructions are stored as a nested dict under "unknown" key.
+    :return: Dictionary with ISA set names as keys and their total counts
+             as values. Unknown instructions are stored as a nested dict
+             under "unknown" key.
     :rtype: dict
     '''
     isa_lists = get_isa_lists()
@@ -641,9 +734,13 @@ def save_instuction_sets(instructions: dict) -> dict:
 
     return isaSets
 
-def get_setInstr(setNames: list, isa_lists: dict) -> list[str]:
+def get_setInstr(
+    setNames: list,
+    isa_lists: dict
+) -> list[str]:
     '''
-    Resolve ISA extension set/subset names to the instruction mnemonics they contain.
+    Resolve ISA extension set/subset names to the instruction mnemonics
+    they contain.
 
     Matching is case-insensitive. A name may refer to an exact set/subset key
     (e.g. "rv32A", "rv32I_loads") or to a whole set made up of several
@@ -669,10 +766,16 @@ def get_setInstr(setNames: list, isa_lists: dict) -> list[str]:
             matchedKeys = [lowerKeys[lname]]
         else:
             prefix = f"{lname}_"
-            matchedKeys = [key for lkey, key in lowerKeys.items() if lkey.startswith(prefix)]
+            matchedKeys = [
+                key for lkey, key in lowerKeys.items()
+                if lkey.startswith(prefix)
+            ]
 
         if not matchedKeys:
-            logging.warning(f"ISA set \"{name}\" does not match any known set or subset...")
+            logging.warning(
+                f"ISA set \"{name}\" does not match any known set or "
+                "subset..."
+            )
             continue
 
         for key in matchedKeys:
@@ -683,7 +786,11 @@ def get_setInstr(setNames: list, isa_lists: dict) -> list[str]:
 
     return instrs
 
-def extractInstr(instrList: list, filePointer:TextIOWrapper, output_name: str | None = None):
+def extractInstr(
+    instrList: list,
+    filePointer: TextIOWrapper,
+    output_name: str | None = None
+):
     '''
     Extract specific instructions from the assembly file to a new file.
 
@@ -719,39 +826,105 @@ def extractInstr(instrList: list, filePointer:TextIOWrapper, output_name: str | 
 
     fp.close()
 
+def extractHex(
+    instrList: list,
+    filePointer: TextIOWrapper,
+    output_name: str | None = None
+):
+    '''
+    Extract the raw machine code of specific instructions to a hexdump file.
+
+    Reads through the assembly file and writes the little-endian bytes of
+    each matching instruction's opcode, one instruction (4 bytes) per line,
+    in the same file order as extractInstr(). objdump prints each opcode in
+    human-reading order (e.g. "00000513"); this converts it to the
+    little-endian memory byte order (e.g. "13 05 00 00") used by disasm.sh's
+    own <name>.mem, so the two stay consistent.
+
+    :param instrList: List of instruction mnemonics to extract
+    :type instrList: list
+    :param filePointer: Open file pointer to the assembly file
+    :type filePointer: TextIOWrapper
+    :param output_name: Base name for the output file (optional)
+    :type output_name: str | None
+    '''
+    fileName = "extraction.mem"
+    if output_name is not None:
+        fileName = f"{output_name}.mem"
+
+    fp = open(out_path(fileName), 'w')
+
+    filePointer.seek(0)
+
+    for line in filePointer:
+        splitLine = line.split()
+
+        if len(splitLine) > 2:
+            opcode = splitLine[1]
+            instr = splitLine[2]
+
+            if len(opcode) == 8 and instr in instrList:
+                beBytes = bytes.fromhex(opcode)
+                leBytes = beBytes[::-1]
+                fp.write(' '.join(f'{b:02x}' for b in leBytes) + '\n')
+
+    fp.close()
+
 def main():
     '''
     Main entry point for the RISC-V assembly parser.
     
     Orchestrates the parsing process:
-    1. Sets up logging
-    2. Parses command-line arguments
+    1. Sets up logging and parses command-line arguments
+    2. If -list-sets or -list-instr was given, prints the requested ISA
+       set/instruction info and exits
     3. Opens and parses the assembly file
     4. Optionally saves raw instruction counts to CSV
-    5. Categorizes instructions by ISA extension
-    6. Optionally saves ISA set counts to CSV
-    7. Optionally extracts specific instructions to a file
-    
+    5. Optionally extracts specific instructions (and their hexdump, with -eh)
+       to separate files
+    6. Optionally categorizes instructions by ISA extension and saves the
+       counts to CSV
+
     Command-line usage:
     python isa_profiler.py input_file [options]
-    
+
     Options:
     -o OUTPUT_NAME    Base name for output files
     -csv              Save raw instruction counts to CSV
     -isa-csv          Save ISA instruction set counts to CSV
     -e INSTR...       Extract specific instructions to file
     -es SET...        Extract instructions from ISA sets/subsets to file
+    -eh               Also write a hexdump of the extracted instructions
+                      (no-op, with a warning, if used without -e/-es)
     -list-sets        Print the known ISA sets/subsets and exit
+                      (no input_file needed)
+    -list-instr SET...  Print the instructions in the given set(s)/
+                      subset(s), one per line, and exit
+                      (no input_file needed)
     --version         Print the tool's version and exit
+                      (no input_file needed)
     '''
     logger = setupLogger()
     parser = setupArgeparse()
     args = parser.parse_args()
 
     if args.list_sets:
-        isa_lists = get_isa_lists()
-        for name in sorted(isa_lists):
-            print(f"{name} ({len(isa_lists[name])} instructions)")
+        print_isa_lists(get_isa_lists())
+        return
+
+    if args.list_instr is not None:
+        if len(args.list_instr) == 0:
+            parser.error(
+                "-list-instr requires at least one set/subset name"
+            )
+        instrs = get_setInstr(args.list_instr, get_isa_lists())
+        if len(instrs) == 0:
+            logger.error(
+                "No instructions matched the given set(s)/subset(s)"
+            )
+            return
+        for instr in instrs:
+            print(instr)
         return
 
     if args.input_file is None:
@@ -759,12 +932,10 @@ def main():
 
     filePointer = get_filePointer(args.input_file)
     instructions = get_asmInstr(filePointer)
-    #pprint.pprint(instructions)
 
     output_name = None
     if args.output_name is not None:
         output_name = args.output_name
-        print(output_name)
 
     if args.csv == True:
         save_intructions(instructions, output_name)
@@ -779,7 +950,15 @@ def main():
 
     iList = list(dict.fromkeys(iList))
 
-    if len(args.extract) != 0 or len(args.extract_set) != 0:
+    extractionRequested = len(args.extract) != 0 or len(args.extract_set) != 0
+
+    if args.extract_hex and not extractionRequested:
+        logger.warning(
+            '-eh/--extract-hex has no effect without -e/--extract '
+            'or -es/--extract-set'
+        )
+
+    if extractionRequested:
         if len(iList) == 0:
             logger.error('No valid instructions to be extracted')
             return
@@ -787,12 +966,12 @@ def main():
             logger.info(f'Instructions: {iList}')
 
         extractInstr(iList, filePointer, output_name)
+        if args.extract_hex:
+            extractHex(iList, filePointer, output_name)
     filePointer.close()
-
 
     if args.isa_csv:
         isa_sets = save_instuction_sets(instructions)
-        #pprint.pprint(isa_sets)
         save_isa_sets_to_csv(isa_sets, output_name)
 
 if __name__ == "__main__":
