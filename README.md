@@ -1,11 +1,12 @@
 # risc-v_disasm_extract
 
-A toolset for working with RISC-V disassembly: `disasm.sh` turns a compiled ELF into a readable disassembly and a hex dump, and `isa_profiler.py` counts instruction occurrences, categorizes them by RISC-V ISA extension (RV32I, RV32M, RV32A, RV32F, RV32D, RV32C, RV32B, Zicsr, Zifencei, Zicntr), and can extract lines matching specific instructions, or whole ISA sets/subsets, to a separate file.
+A toolset for working with RISC-V disassembly: `disasm.sh` turns a compiled ELF into a readable disassembly and a hex dump, and `isa_profiler.py` counts instruction occurrences, categorizes them by RISC-V ISA extension (RV32I, RV32M, RV32A, RV32F, RV32D, RV32C, RV32B — split into its Zba/Zbb/Zbc/Zbs sub-extensions — Zmmul, Zicond, Zfh, Zicsr, Zifencei, Zicntr, RV32V), and can extract lines matching specific instructions, or whole ISA sets/subsets, to a separate file.
 
 ## Layout
 
-- [`src/`](src/) — `disasm.sh` and `isa_profiler.py` (see [src/README.md](src/README.md) for details on each)
+- [`src/`](src/) — `disasm.sh`, `isa_profiler.py`, and `isa_rv32.py` (see [src/README.md](src/README.md) for details on each)
 - [`out/`](out/) — generated files, created automatically if missing
+- [`tests/`](tests/) — `isa_profiler.py`'s test suite (`python3 -m unittest discover -s tests` or `make test`; see [tests/README.md](tests/README.md) for what each test covers)
 
 ## Requirements
 
@@ -22,6 +23,7 @@ make ELF=path/to/test1.out [NAME=name]          # full pipeline: disasm + profil
 make disasm ELF=path/to/test1.out [NAME=name]   # just the disassembly step
 make profiler ASM=out/test1.asm [NAME=name]     # just the profiling step
 make check                                      # check disasm.sh's required tools and Python version
+make test                                       # run isa_profiler.py's test suite
 make clean                                      # remove generated files from out/
 make help                                       # describe targets and variables
 ```
@@ -50,7 +52,7 @@ python src/isa_profiler.py <input_file> [options]  # or -h/--help, -v/--version
 | `-isa-csv` | Save per-ISA-extension instruction counts to a CSV file |
 | `-e`, `--extract` | One or more instruction mnemonics to extract to `<output_name>.asm` (or `extraction.asm` if `-o` is not given) |
 | `-es`, `--extract-set` | One or more ISA sets/subsets to extract (e.g. `rv32I`, `rv32I_loads`, `rv32A`), combinable with `-e`; case-insensitive, matches an exact set/subset or a whole set's subsets by prefix |
-| `-eh`, `--extract-hex` | With `-e`/`-es`: also write `<output_name>.mem`, one extracted instruction's 4 bytes per line (little-endian), in the same order as the `.asm` extraction. Warns and does nothing if used without `-e`/`-es` |
+| `-eh`, `--extract-hex` | With `-e`/`-es`: also write `<output_name>.mem`, one extracted instruction's raw bytes per line (little-endian; 4 bytes for a 32-bit instruction, 2 for a compressed one), in the same order as the `.asm` extraction. Warns and does nothing if used without `-e`/`-es` |
 | `-list-sets` | Print the known ISA sets/subsets and exit, with subsets tab-indented beneath their whole set (`input_file` not required) |
 | `-list-instr` | One or more ISA sets/subsets; print the instruction mnemonics they contain (one per line) and exit — same resolution as `-es` (whole-set expansion, case-insensitive, deduplicated), but a static lookup, not filtered by any file (`input_file` not required) |
 | `-v`, `--version` | Print the tool's version and exit (`input_file` not required) |
@@ -119,7 +121,7 @@ For example:
    1000: 00000513              li a0,0
 ```
 
-A line is only treated as an instruction if it has more than two whitespace-separated fields and the opcode field (2nd column) is exactly 8 characters (a 32-bit hex opcode). Lines are skipped if the instruction field:
+A line is only treated as an instruction if it has more than two whitespace-separated fields and the opcode field (2nd column) is exactly 8 characters (a 32-bit opcode) or 4 characters (a 16-bit compressed/RVC opcode). objdump always disassembles a compressed instruction using its base/pseudo-op mnemonic (e.g. `c.li` prints as `li`), never the literal `c.li` form, so it's resolved back to its real `c.*` name before counting — kept separate from a 32-bit instruction that happens to print the same way. A handful of these aliases are ambiguous by mnemonic text alone (e.g. `addi` covers `c.addi`, `c.addi16sp`, and `c.addi4spn`) and are disambiguated using the operand text too; see `resolve_compressed_mnemonic()` in `isa_profiler.py`. Lines are skipped if the instruction field:
 
 - consists entirely of hex digits,
 - starts with `.`, `<`, `(`, `@`, or `)`, or
@@ -136,7 +138,7 @@ All generated files are written to `out/`.
 - **`<output_name>.csv`** (or `instructions.csv` by default) — two rows: instruction mnemonics and their counts, written when `-csv` is passed to `isa_profiler.py`.
 - **`<output_name>_isa_sets.csv`** (or `isa_sets.csv` by default) — two rows: ISA extension/unknown-instruction names and their counts, written when `-isa-csv` is passed. Instructions that don't match a known ISA set are listed individually under an `unknown_` prefix.
 - **`<output_name>.asm`** (or `extraction.asm` by default) — lines containing the requested instructions (via `-e`/`--extract`), one per line.
-- **`<output_name>.mem`** (or `extraction.mem` by default) — one extracted instruction's 4 raw bytes per line, little-endian, written when `-eh`/`--extract-hex` is passed alongside `-e`/`-es`. Note this shares its default naming pattern with `disasm.sh`'s own `<output_name>.mem` above — use distinct `-o`/`NAME` values (or separate `DEST` folders) to avoid overwriting one with the other.
+- **`<output_name>.mem`** (or `extraction.mem` by default) — one extracted instruction's raw bytes per line, little-endian (4 bytes for a 32-bit instruction, 2 for a 16-bit compressed one), written when `-eh`/`--extract-hex` is passed alongside `-e`/`-es`. Note this shares its default naming pattern with `disasm.sh`'s own `<output_name>.mem` above — use distinct `-o`/`NAME` values (or separate `DEST` folders) to avoid overwriting one with the other.
 
 ## License
 

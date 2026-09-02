@@ -23,9 +23,12 @@ ifneq ($(ASM_NAME),)
 	ASM ?= $(OUT_DIR)/$(ASM_NAME).asm
 endif
 
-.PHONY: all disasm profiler check clean help
+.PHONY: all disasm profiler check test clean help
 
 all: disasm profiler
+
+test:
+	$(PYTHON) -m unittest discover -s tests -v
 
 check:
 	@$(SRC_DIR)/disasm.sh --check
@@ -48,13 +51,14 @@ help:
 	@echo "  disasm         Disassemble ELF to out/<name>.asm and out/<name>.mem"
 	@echo "  profiler       Parse an .asm file, categorize/count instructions"
 	@echo "  check          Check for required RISC-V tools and Python version"
+	@echo "  test           Run the test suite for the Profiler"
 	@echo "  clean          Remove generated files from out/"
 	@echo "  help           Show usage"
 	@echo ""
 	@echo "Variables:"
 	@echo "  ELF             Input ELF file (required for disasm, and all unless ASM is set)"
 	@echo "  NAME            Output base name shared by both tools (optional)"
-	@echo "  ASM             Input .asm file for profiler (optional; default: out/<NAME or ELF>.asm)"
+	@echo "  ASM             Input .asm file for Profiler (optional; default: out/<NAME or ELF>.asm)"
 	@echo "  DEST            Destination directory to copy output files to (optional; default: no copy)"
 	@echo "  PROFILER_FLAGS  Flags passed to Profiler (default: -isa-csv)"
 	@echo ""

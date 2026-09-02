@@ -2,7 +2,7 @@
 RISC-V instruction counter and ISA extension profiler
 """
 __author__ = "Nikolaos Kostakis"
-__version__ = "1.3"
+__version__ = "1.4"
 
 import os
 import sys
@@ -13,6 +13,8 @@ import string
 
 from io import TextIOWrapper
 from logging import Logger
+import isa_rv32
+from isa_rv32 import HEX_MNEMONICS, ISA_UMBRELLAS
 
 def setupLogger() -> Logger:
     '''
@@ -193,22 +195,77 @@ def get_filePointer(fileName:str) -> TextIOWrapper:
     except FileNotFoundError:
         logging.error("File not found, exiting...")
         sys.exit()
-    
+
+    logging.debug(f"Opened file: {fileName}")
     return filePointer
+
+def resolve_compressed_mnemonic(instr: str, operands: str) -> str:
+    '''
+    Map a compressed (RVC) instruction's displayed objdump mnemonic to
+    its real "c.*" name.
+
+    objdump always disassembles a compressed instruction using its
+    base/pseudo-op alias, and for a few instructions that alias is
+    ambiguous (or outright misleading) by mnemonic text alone:
+    - "ret" is always the c.jr ra alias -- there's no separate "c.ret"
+    - "addi" covers three different real instructions: c.addi16sp
+      (destination and source are both literally "sp"), c.addi4spn
+      (only the source is "sp"), and plain c.addi (neither is)
+    - "lw"/"sw" each cover two real instructions -- c.lwsp/c.swsp when
+      the memory operand's base register is literally "sp", else
+      plain c.lw/c.sw
+    Every other compressed instruction's displayed mnemonic maps 1:1
+    onto its real "c.*" name by simple prefixing.
+
+    :param instr: The mnemonic objdump printed (e.g. "addi", "ret")
+    :type instr: str
+    :param operands: The raw operand text following the mnemonic, with
+                      no whitespace (objdump's own format)
+    :type operands: str
+    :return: The instruction's real "c.*" mnemonic
+    :rtype: str
+    '''
+    if instr == "ret":
+        return "c.jr"
+
+    if instr == "addi":
+        rd, rs1 = operands.split(",")[:2]
+        if rd == "sp" and rs1 == "sp":
+            return "c.addi16sp"
+        if rs1 == "sp":
+            return "c.addi4spn"
+        return "c.addi"
+
+    if instr in ("lw", "sw"):
+        base = operands.rsplit("(", 1)[-1].rstrip(")")
+        if base == "sp":
+            return f"c.{instr}sp"
+        return f"c.{instr}"
+
+    return f"c.{instr}"
 
 def get_asmInstr(
     filePointer:TextIOWrapper
 ) -> dict:
     '''
     Parse assembly instructions from the file and count their occurrences.
-    
+
     Reads through the assembly file line by line, extracts instruction
     mnemonics, and counts their frequency. Filters out invalid instructions
     based on:
-    - Instructions that are all hexadecimal digits
+    - Instructions that are all hexadecimal digits (raw data words objdump
+      sometimes prints in place of a mnemonic), except real mnemonics that
+      happen to consist entirely of hex-digit characters (see HEX_MNEMONICS)
     - Instructions starting with '.', '(', '@', or ')'
     - Instructions ending with '.'
     - Lines that don't have the expected format (address + instruction)
+    - Opcode fields that aren't valid hex, or aren't 8 digits (32-bit)
+      or 4 digits (16-bit compressed/RVC) wide
+
+    A compressed (RVC) instruction is counted under its real "c.*"
+    mnemonic (see resolve_compressed_mnemonic()), kept separate from
+    its 32-bit counterpart even though objdump prints both the same way
+    (e.g. c.li and li both print as "li").
 
     :param filePointer: Open file pointer to the assembly file
     :type filePointer: TextIOWrapper
@@ -223,9 +280,11 @@ def get_asmInstr(
         splitLine = line.split()
 
         if len(splitLine) > 2:
+            opcode = splitLine[1]
             instr = splitLine[2]
 
-            if all(char in string.hexdigits for char in instr):
+            is_hex_digits = all(c in string.hexdigits for c in instr)
+            if is_hex_digits and instr not in HEX_MNEMONICS:
                 continue
 
             if instr[0] in '.<()@':
@@ -234,7 +293,15 @@ def get_asmInstr(
             if instr.endswith('.'):
                 continue
 
-            if (len(splitLine[1]) == 8):
+            is_valid_opcode = (
+                len(opcode) in (4, 8)
+                and all(c in string.hexdigits for c in opcode)
+            )
+            if is_valid_opcode:
+                if len(opcode) == 4:
+                    operands = splitLine[3] if len(splitLine) > 3 else ""
+                    instr = resolve_compressed_mnemonic(instr, operands)
+
                 if instr not in instructions:
                     instructions.update({instr:1})
                 else:
@@ -299,12 +366,14 @@ def save_intructions(
     fileName = "instructions.csv"
     if output_name is not None:
         fileName = f"{output_name}.csv"
+    fileName = out_path(fileName)
 
-    with open(out_path(fileName), 'w') as fp:
+    with open(fileName, 'w') as fp:
         csvWriter = csv.writer(fp)
         csvWriter.writerow(instructions.keys())
         csvWriter.writerow(instructions.values())
 
+    logging.debug(f"Wrote {len(instructions)} instruction(s) to {fileName}")
     return
 
 def save_isa_sets_to_csv(
@@ -348,11 +417,13 @@ def save_isa_sets_to_csv(
         csvWriter.writerow(names)
         csvWriter.writerow(counts)
 
+    logging.debug(f"Wrote {len(names)} ISA set entry(ies) to {fileName}")
     return
 
 def get_isa_lists() -> dict[str, list[str]]:
     '''
-    Build the RISC-V ISA extension set/subset instruction lists.
+    Assemble isa_rv32's per-category instruction tables into the
+    RISC-V ISA extension set/subset mapping the rest of the tool uses.
 
     Each key is either a whole ISA extension (e.g. "rv32A") or one of its
     functional subsets (e.g. "rv32I_loads", "rv32M_mul"), mapped to the
@@ -364,298 +435,47 @@ def get_isa_lists() -> dict[str, list[str]]:
     :return: Mapping of ISA set/subset names to their instruction mnemonics
     :rtype: dict[str, list[str]]
     '''
-    # RV32I Base Integer Instructions (grouped by functional category)
-    # Logic operations (and/or/xor and their immediate forms)
-    rv32I_logic = [
-        "and", "or", "xor", "andi", "ori", "xori",
-        # Pseudo-ops that map to logic operations
-        "not", "mv", "zext.b", "zext.h"
-    ]
-
-    # Add/Sub operations (and their pseudo-ops)
-    rv32I_addsub = [
-        "add", "addi", "sub",
-        # Pseudo-ops that map to add/sub
-        "nop", "neg", "negw", "sext.w", "zext.w"
-    ]
-
-    # Shift operations (logical/arithmetic shifts)
-    rv32I_shifts = [
-        "sll", "slli", "srl", "srli", "sra", "srai"
-    ]
-
-    # Comparison operations (and related pseudo-ops)
-    rv32I_comparisons = [
-        "slt", "slti", "sltu", "sltiu",
-        # Pseudo-ops
-        "seqz", "snez", "sltz", "sgtz"
-    ]
-
-    # Jump operations (unconditional jumps and returns)
-    rv32I_jumps = [
-        "jal", "jalr",
-        # Pseudo-ops
-        "j", "jr", "ret", "call", "tail"
-    ]
-
-    # Branch operations (conditional branches)
-    rv32I_branches = [
-        "beq", "bne", "blt", "bge", "bltu", "bgeu",
-        # Pseudo-ops
-        "beqz", "bnez", "blez", "bgez", "bltz", "bgtz",
-        "bgt", "ble", "bgtu", "bleu"
-    ]
-
-    # Load operations
-    rv32I_loads = [
-        "lb", "lh", "lw", "lbu", "lhu",
-        # Pseudo-ops
-        "li", "la", "lbz", "lhz", "lwz"
-    ]
-
-    # Store operations
-    rv32I_stores = [
-        "sb", "sh", "sw",
-        # Pseudo-ops
-        "sbz", "shz", "swz"
-    ]
-
-    # Other RV32I operations (control and system)
-    rv32I_other = [
-        "lui", "auipc",
-        "fence", "ecall", "ebreak"
-    ]
-
-    # RV32M Multiplication and Division Extension
-    # Multiplication operations
-    rv32M_mul = [
-        "mul", "mulh", "mulhsu", "mulhu"
-    ]
-
-    # Division operations
-    rv32M_div = [
-        "div", "divu"
-    ]
-
-    # Remainder operations
-    rv32M_rem = [
-        "rem", "remu"
-    ]
-
-    # RV32A Atomic Extension
-    rv32A = [
-        # Basic load-reserved and store-conditional
-        "lr.w", "sc.w",
-        
-        # Atomic memory operations (no ordering)
-        "amoswap.w", "amoadd.w", "amoxor.w", "amoand.w", "amoor.w",
-        "amomin.w", "amomax.w", "amominu.w", "amomaxu.w",
-        
-        # With acquire (aq) ordering
-        "lr.w.aq", "sc.w.aq",
-        "amoswap.w.aq", "amoadd.w.aq", "amoxor.w.aq", "amoand.w.aq",
-        "amoor.w.aq", "amomin.w.aq", "amomax.w.aq", "amominu.w.aq",
-        "amomaxu.w.aq",
-
-        # With release (rl) ordering
-        "lr.w.rl", "sc.w.rl",
-        "amoswap.w.rl", "amoadd.w.rl", "amoxor.w.rl", "amoand.w.rl",
-        "amoor.w.rl", "amomin.w.rl", "amomax.w.rl", "amominu.w.rl",
-        "amomaxu.w.rl",
-
-        # With acquire-release (aqrl) ordering
-        "lr.w.aqrl", "sc.w.aqrl",
-        "amoswap.w.aqrl", "amoadd.w.aqrl", "amoxor.w.aqrl",
-        "amoand.w.aqrl", "amoor.w.aqrl", "amomin.w.aqrl", "amomax.w.aqrl",
-        "amominu.w.aqrl", "amomaxu.w.aqrl"
-    ]
-
-    # RV32F Single-Precision Floating-Point Extension
-    rv32F = [
-        # Load and store
-        "flw", "fsw",
-        
-        # Fused multiply-add operations
-        "fmadd.s", "fmsub.s", "fnmsub.s", "fnmadd.s",
-        
-        # Arithmetic operations
-        "fadd.s", "fsub.s", "fmul.s", "fdiv.s", "fsqrt.s",
-        
-        # Sign manipulation
-        "fsgnj.s", "fsgnjn.s", "fsgnjx.s",
-        
-        # Min/Max operations
-        "fmin.s", "fmax.s",
-        
-        # Conversion to integer
-        "fcvt.w.s", "fcvt.wu.s", "fmv.x.w",
-        
-        # Comparison operations
-        "feq.s", "flt.s", "fle.s", "fclass.s",
-        
-        # Conversion from integer
-        "fcvt.s.w", "fcvt.s.wu", "fmv.w.x",
-    
-        "fmv.s",    # Move single-precision float
-        "fabs.s",   # Absolute value
-        "fneg.s"    # Negate
-    ]
-
-    # RV32D Double-Precision Floating-Point Extension
-    rv32D = [
-        # Load and store
-        "fld", "fsd",
-        
-        # Fused multiply-add operations
-        "fmadd.d", "fmsub.d", "fnmsub.d", "fnmadd.d",
-        
-        # Arithmetic operations
-        "fadd.d", "fsub.d", "fmul.d", "fdiv.d", "fsqrt.d",
-        
-        # Sign manipulation
-        "fsgnj.d", "fsgnjn.d", "fsgnjx.d",
-        
-        # Min/Max operations
-        "fmin.d", "fmax.d",
-        
-        # Conversion between single and double
-        "fcvt.s.d", "fcvt.d.s",
-        
-        # Comparison operations
-        "feq.d", "flt.d", "fle.d", "fclass.d",
-        
-        # Conversion to integer
-        "fcvt.w.d", "fcvt.wu.d",
-        
-        # Conversion from integer
-        "fcvt.d.w", "fcvt.d.wu",
-    
-        "fmv.d",    # Move double-precision float
-        "fabs.d",   # Absolute value
-        "fneg.d"    # Negate
-    ]
-
-    # RV32C Compressed Instructions Extension
-    rv32C = [
-        # Stack pointer operations
-        "c.addi4spn", "c.addi16sp",
-        
-        # Load and store (immediate offset)
-        "c.lw", "c.sw",
-        
-        # Immediate operations
-        "c.addi", "c.li", "c.lui", "c.slli", "c.srli", "c.srai", "c.andi",
-        
-        # Register operations
-        "c.sub", "c.xor", "c.or", "c.and", "c.add",
-        
-        # Control flow
-        "c.j", "c.jal", "c.jr", "c.jalr", "c.beqz", "c.bnez",
-        
-        # Stack pointer load/store
-        "c.lwsp", "c.swsp",
-        
-        # Miscellaneous
-        "c.mv", "c.ebreak"
-    ]
-
-    # RV32B Bit Manipulation Extension
-    rv32B = [
-        # Logic operations
-        "andn", "orn", "xnor",
-        
-        # Count operations
-        "clz", "ctz", "cpop",
-        
-        # Min/Max operations
-        "max", "maxu", "min", "minu",
-        
-        # Sign/Zero extension
-        "sext.b", "sext.h", "zext.h",
-        
-        # Rotate operations
-        "rol", "ror", "rori",
-        
-        # Bit manipulation
-        "orc.b", "rev8",
-        
-        # Carry-less multiplication
-        "clmul", "clmulh", "clmulr",
-        
-        # Bit set operations
-        "bset", "bseti",
-        
-        # Bit clear operations
-        "bclr", "bclri",
-        
-        # Bit invert operations
-        "binv", "binvi",
-        
-        # Bit extract operations
-        "bext", "bexti",
-        
-        # Shift and add operations
-        "sh1add", "sh2add", "sh3add"
-    ]
-
-    # Zicsr Control and Status Register Extension
-    zicsr = [
-        # CSR operations with register source
-        "csrrw", "csrrs", "csrrc",
-        
-        # CSR operations with immediate source
-        "csrrwi", "csrrsi", "csrrci",
-    
-        # RV32F/D CSR Pseudo-Instructions
-        "frrm",      # read floating-point rounding mode
-        "fsrm",      # set floating-point rounding mode from register
-        "fsrmi",     # set floating-point rounding mode immediate
-        "frflags",   # read floating-point exception flags
-        "fsflags",    # set floating-point exception flags
-    
-        # CSR pseudo-ops with register
-        "csrr", "csrw", "csrs", "csrc",
-        
-        # CSR pseudo-ops with immediate
-        "csrwi", "csrsi", "csrci"
-    ]
-
-    # Zifencei Instruction-Fetch Fence Extension
-    zifencei = [
-        "fence.i"  # Instruction fence
-    ]
-
-    # Zicntr Counters Extension
-    zicntr = [
-        # Basic counters
-        "rdcycle", "rdtime", "rdinstret",
-        
-        # High word counters
-        "rdcycleh", "rdtimeh", "rdinstreth"
-    ]
-
     return {
         # RV32I grouped by functional category
-        "rv32I_logic": rv32I_logic,
-        "rv32I_addsub": rv32I_addsub,
-        "rv32I_shifts": rv32I_shifts,
-        "rv32I_comparisons": rv32I_comparisons,
-        "rv32I_jumps": rv32I_jumps,
-        "rv32I_branches": rv32I_branches,
-        "rv32I_loads": rv32I_loads,
-        "rv32I_stores": rv32I_stores,
-        "rv32I_other": rv32I_other,
-        "rv32M_mul": rv32M_mul,
-        "rv32M_div": rv32M_div,
-        "rv32M_rem": rv32M_rem,
-        "rv32A": rv32A,
-        "rv32F": rv32F,
-        "rv32D": rv32D,
-        "rv32C": rv32C,
-        "rv32B": rv32B,
-        "zicsr": zicsr,
-        "zifencei": zifencei,
-        "zicntr": zicntr,
+        "rv32I_logic": isa_rv32.rv32I_logic,
+        "rv32I_addsub": isa_rv32.rv32I_addsub,
+        "rv32I_shifts": isa_rv32.rv32I_shifts,
+        "rv32I_comparisons": isa_rv32.rv32I_comparisons,
+        "rv32I_jumps": isa_rv32.rv32I_jumps,
+        "rv32I_branches": isa_rv32.rv32I_branches,
+        "rv32I_loads": isa_rv32.rv32I_loads,
+        "rv32I_stores": isa_rv32.rv32I_stores,
+        "rv32I_other": isa_rv32.rv32I_other,
+        "rv32M_mul": isa_rv32.rv32M_mul,
+        "rv32M_div": isa_rv32.rv32M_div,
+        "rv32M_rem": isa_rv32.rv32M_rem,
+        "rv32A": isa_rv32.rv32A,
+        "rv32F": isa_rv32.rv32F,
+        "rv32D": isa_rv32.rv32D,
+        "rv32C": isa_rv32.rv32C,
+        # RV32B's 4 ratified sub-extensions -- see ISA_UMBRELLAS for how
+        # "rv32B" maps to these
+        "zba": isa_rv32.zba,
+        "zbb": isa_rv32.zbb,
+        "zbc": isa_rv32.zbc,
+        "zbs": isa_rv32.zbs,
+        "zmmul": isa_rv32.zmmul,
+        "zicond": isa_rv32.zicond,
+        "zfh": isa_rv32.zfh,
+        "zicsr": isa_rv32.zicsr,
+        "zifencei": isa_rv32.zifencei,
+        "zicntr": isa_rv32.zicntr,
+        # RV32V grouped by functional category, like RV32I/RV32M
+        "rv32V_config": isa_rv32.rv32V_config,
+        "rv32V_loads": isa_rv32.rv32V_loads,
+        "rv32V_stores": isa_rv32.rv32V_stores,
+        "rv32V_integer": isa_rv32.rv32V_integer,
+        "rv32V_fixed_point": isa_rv32.rv32V_fixed_point,
+        "rv32V_float": isa_rv32.rv32V_float,
+        "rv32V_reduction": isa_rv32.rv32V_reduction,
+        "rv32V_mask": isa_rv32.rv32V_mask,
+        "rv32V_permute": isa_rv32.rv32V_permute,
+        "rv32V_whole_reg": isa_rv32.rv32V_whole_reg,
     }
 
 def print_isa_lists(isa_lists: dict[str, list[str]]) -> None:
@@ -666,22 +486,28 @@ def print_isa_lists(isa_lists: dict[str, list[str]]) -> None:
     A key with an underscore (e.g. "rv32I_loads") is treated as a subset
     of the whole set named by the part before the first underscore (e.g.
     "rv32I"); its instruction count is rolled up into that whole set's
-    total. A key with no underscore (e.g. "rv32A") has no subsets and is
-    printed on its own.
+    total. A key listed as a member in ISA_UMBRELLAS (e.g. "zba", under
+    "rv32B") is grouped the same way, under its umbrella name instead of
+    a shared prefix. A key that's neither has no subsets and is printed
+    on its own.
 
     :param isa_lists: Mapping of set/subset names to instruction mnemonics
     :type isa_lists: dict[str, list[str]]
     '''
     subsetsOf: dict[str, list[str]] = {}
-    tops: set[str] = set()
+    grouped: set[str] = set()
 
     for name in isa_lists:
         if "_" in name:
             whole = name.split("_", 1)[0]
             subsetsOf.setdefault(whole, []).append(name)
-            tops.add(whole)
-        else:
-            tops.add(name)
+            grouped.add(name)
+
+    for umbrella, members in ISA_UMBRELLAS.items():
+        subsetsOf.setdefault(umbrella, []).extend(members)
+        grouped.update(members)
+
+    tops = (set(isa_lists) - grouped) | set(subsetsOf)
 
     for name in sorted(tops):
         if name in subsetsOf:
@@ -743,8 +569,10 @@ def get_setInstr(
     they contain.
 
     Matching is case-insensitive. A name may refer to an exact set/subset key
-    (e.g. "rv32A", "rv32I_loads") or to a whole set made up of several
-    functional subsets (e.g. "rv32I" expands to every rv32I_* subset).
+    (e.g. "rv32A", "rv32I_loads"), to a whole set made up of several
+    functional subsets sharing its name as a prefix (e.g. "rv32I" expands
+    to every rv32I_* subset), or to an umbrella of independently-named
+    sets listed in ISA_UMBRELLAS (e.g. "rv32B" expands to Zba/Zbb/Zbc/Zbs).
     Names that match nothing are logged as warnings and skipped.
 
     :param setNames: ISA set or subset names to resolve
@@ -755,6 +583,9 @@ def get_setInstr(
     :rtype: list[str]
     '''
     lowerKeys = {key.lower(): key for key in isa_lists}
+    lowerUmbrellas = {
+        name.lower(): members for name, members in ISA_UMBRELLAS.items()
+    }
 
     instrs: list[str] = []
     seen: set[str] = set()
@@ -764,6 +595,8 @@ def get_setInstr(
 
         if lname in lowerKeys:
             matchedKeys = [lowerKeys[lname]]
+        elif lname in lowerUmbrellas:
+            matchedKeys = lowerUmbrellas[lname]
         else:
             prefix = f"{lname}_"
             matchedKeys = [
@@ -797,7 +630,10 @@ def extractInstr(
     Reads through the assembly file and writes lines containing the specified
     instructions to '<output_name>.asm', or 'extraction.asm' if no output
     name is given. Only includes lines that match the expected format and
-    contain instructions from the provided list.
+    contain instructions from the provided list. A compressed (RVC) line is
+    matched against its real "c.*" mnemonic (see
+    resolve_compressed_mnemonic()), same as get_asmInstr(), even though the
+    written line keeps objdump's own displayed text unchanged.
 
     :param instrList: List of instruction mnemonics to extract
     :type instrList: list
@@ -810,21 +646,37 @@ def extractInstr(
     if output_name is not None:
         fileName = f"{output_name}.asm"
 
-    fp = open(out_path(fileName), 'w')
+    resolvedPath = out_path(fileName)
+    fp = open(resolvedPath, 'w')
 
     filePointer.seek(0)
 
+    written = 0
     for line in filePointer:
         splitLine = line.split()
 
         if len(splitLine) > 2:
+            opcode = splitLine[1]
             instr = splitLine[2]
 
-            if (len(splitLine[1]) == 8):
-                if instr in instrList:
+            is_valid_opcode = (
+                len(opcode) in (4, 8)
+                and all(c in string.hexdigits for c in opcode)
+            )
+            if is_valid_opcode:
+                matchInstr = instr
+                if len(opcode) == 4:
+                    operands = splitLine[3] if len(splitLine) > 3 else ""
+                    matchInstr = resolve_compressed_mnemonic(
+                        instr, operands
+                    )
+
+                if matchInstr in instrList:
                     fp.write(' '.join(splitLine[2:])+'\n')
+                    written += 1
 
     fp.close()
+    logging.debug(f"Wrote {written} line(s) to {resolvedPath}")
 
 def extractHex(
     instrList: list,
@@ -835,11 +687,16 @@ def extractHex(
     Extract the raw machine code of specific instructions to a hexdump file.
 
     Reads through the assembly file and writes the little-endian bytes of
-    each matching instruction's opcode, one instruction (4 bytes) per line,
-    in the same file order as extractInstr(). objdump prints each opcode in
+    each matching instruction's opcode, one instruction per line, in the
+    same file order as extractInstr(). objdump prints each opcode in
     human-reading order (e.g. "00000513"); this converts it to the
     little-endian memory byte order (e.g. "13 05 00 00") used by disasm.sh's
-    own <name>.mem, so the two stay consistent.
+    own <name>.mem, so the two stay consistent. A line has 4 bytes for a
+    32-bit instruction or 2 bytes for a 16-bit compressed (RVC) one, so
+    lines are not fixed-width -- each carries exactly the instruction's
+    real encoded size. A compressed line is matched against its real
+    "c.*" mnemonic, same as get_asmInstr() -- see
+    resolve_compressed_mnemonic().
 
     :param instrList: List of instruction mnemonics to extract
     :type instrList: list
@@ -852,10 +709,12 @@ def extractHex(
     if output_name is not None:
         fileName = f"{output_name}.mem"
 
-    fp = open(out_path(fileName), 'w')
+    resolvedPath = out_path(fileName)
+    fp = open(resolvedPath, 'w')
 
     filePointer.seek(0)
 
+    written = 0
     for line in filePointer:
         splitLine = line.split()
 
@@ -863,12 +722,23 @@ def extractHex(
             opcode = splitLine[1]
             instr = splitLine[2]
 
-            if len(opcode) == 8 and instr in instrList:
+            is_valid_opcode = (
+                len(opcode) in (4, 8)
+                and all(c in string.hexdigits for c in opcode)
+            )
+            matchInstr = instr
+            if is_valid_opcode and len(opcode) == 4:
+                operands = splitLine[3] if len(splitLine) > 3 else ""
+                matchInstr = resolve_compressed_mnemonic(instr, operands)
+
+            if is_valid_opcode and matchInstr in instrList:
                 beBytes = bytes.fromhex(opcode)
                 leBytes = beBytes[::-1]
                 fp.write(' '.join(f'{b:02x}' for b in leBytes) + '\n')
+                written += 1
 
     fp.close()
+    logging.debug(f"Wrote {written} line(s) to {resolvedPath}")
 
 def main():
     '''
@@ -908,10 +778,13 @@ def main():
     parser = setupArgeparse()
     args = parser.parse_args()
 
+    # -list-sets: print every known ISA set/subset and exit, no file needed
     if args.list_sets:
         print_isa_lists(get_isa_lists())
         return
 
+    # -list-instr: print the instructions in the given set(s)/subset(s)
+    # and exit, no file needed
     if args.list_instr is not None:
         if len(args.list_instr) == 0:
             parser.error(
@@ -927,19 +800,30 @@ def main():
             print(instr)
         return
 
+    # everything below here parses an actual assembly file
     if args.input_file is None:
         parser.error("input_file is required")
 
+    # parse the file into a {instruction: count} dictionary
     filePointer = get_filePointer(args.input_file)
     instructions = get_asmInstr(filePointer)
+    total = sum(instructions.values())
+    logger.debug(
+        f"Parsed {len(instructions)} distinct instruction(s), "
+        f"{total} total occurrence(s)"
+    )
 
+    # base name shared by every output file this run produces
     output_name = None
     if args.output_name is not None:
         output_name = args.output_name
+        logger.debug(f"Output name: {output_name}")
 
+    # -csv: save the raw instruction counts
     if args.csv == True:
         save_intructions(instructions, output_name)
 
+    # resolve which instructions to extract, from -e and/or -es combined
     iList = []
     if len(args.extract) != 0:
         iList += get_splitInstr(instructions, args.extract)
@@ -952,12 +836,15 @@ def main():
 
     extractionRequested = len(args.extract) != 0 or len(args.extract_set) != 0
 
+    # -eh only makes sense alongside an actual extraction
     if args.extract_hex and not extractionRequested:
         logger.warning(
             '-eh/--extract-hex has no effect without -e/--extract '
             'or -es/--extract-set'
         )
 
+    # write the extracted instructions (.asm) and, with -eh, their
+    # hexdump (.mem)
     if extractionRequested:
         if len(iList) == 0:
             logger.error('No valid instructions to be extracted')
@@ -970,8 +857,17 @@ def main():
             extractHex(iList, filePointer, output_name)
     filePointer.close()
 
+    # -isa-csv: categorize instructions by ISA extension and save the counts
     if args.isa_csv:
         isa_sets = save_instuction_sets(instructions)
+        categorized = sum(
+            v for v in isa_sets.values() if not isinstance(v, dict)
+        )
+        unknownCount = len(isa_sets.get("unknown", {}))
+        logger.debug(
+            f"Categorized {categorized} instruction occurrence(s) "
+            f"across ISA sets, {unknownCount} unknown mnemonic(s)"
+        )
         save_isa_sets_to_csv(isa_sets, output_name)
 
 if __name__ == "__main__":

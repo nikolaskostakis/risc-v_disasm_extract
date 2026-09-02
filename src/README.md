@@ -33,14 +33,16 @@ python isa_profiler.py <input_file> [options]
 | `-isa-csv` | Save per-ISA-extension instruction counts to CSV |
 | `-e`, `--extract` | Instruction mnemonics to extract to a separate `.asm` file |
 | `-es`, `--extract-set` | ISA sets/subsets to extract, e.g. `rv32I`, `rv32I_loads`, `rv32A` (combinable with `-e`) |
-| `-eh`, `--extract-hex` | With `-e`/`-es`: also write a hexdump of the extracted instructions (4 little-endian bytes per line, one instruction per line). Warns and does nothing if used without `-e`/`-es` |
+| `-eh`, `--extract-hex` | With `-e`/`-es`: also write a hexdump of the extracted instructions, one per line, little-endian (4 bytes for a 32-bit instruction, 2 for a compressed one). Warns and does nothing if used without `-e`/`-es` |
 | `-list-sets` | Print the known ISA sets/subsets and exit; `input_file` not required |
 | `-list-instr` | Print the instruction mnemonics in the given set(s)/subset(s), one per line, and exit; `input_file` not required |
 | `-v`, `--version` | Print the tool's version and exit; `input_file` not required |
 
-### ISA sets and subsets
+## isa_rv32.py
 
-Names are case-insensitive. A whole set (e.g. `rv32I`) expands to all of its subsets; a subset (e.g. `rv32I_loads`) matches just that category. Used by both `-isa-csv` categorization and `-es`/`--extract-set`. Run `isa_profiler.py -list-sets` to print this list from the CLI directly — whole sets are printed with their subsets tab-indented beneath them.
+Not a standalone tool — the raw per-category instruction tables (and `HEX_MNEMONICS`/`ISA_UMBRELLAS`) that `isa_profiler.py`'s `get_isa_lists()` assembles into the `{name: instructions}` mapping defining which mnemonics belong to which supported RISC-V ISA set/subset. Kept separate so the instruction-list data isn't buried in the parsing/profiling logic; the assembly logic itself (`get_isa_lists()`) stays in `isa_profiler.py`. To support a new extension, add its instruction list here as its own module-level constant and register it in `get_isa_lists()`. Named `isa_rv32` (not `isa_sets`) so an `isa_rv64` module could sit alongside it if 64-bit support is ever added.
+
+Names are case-insensitive. A whole set (e.g. `rv32I`) expands to all of its subsets; a subset (e.g. `rv32I_loads`) matches just that category. `rv32I`/`rv32M`'s subsets are our own functional groupings (not official RISC-V names), matched by shared name prefix; `rv32B`'s members are real, independently-named, ratified sub-extensions (`Zba`/`Zbb`/`Zbc`/`Zbs`), so each also works on its own (e.g. `-es Zba`), not just as part of the `rv32B` umbrella (see `ISA_UMBRELLAS`). Used by both `-isa-csv` categorization and `-es`/`--extract-set`. Run `isa_profiler.py -list-sets` to print this list from the CLI directly — whole sets are printed with their subsets tab-indented beneath them.
 
 | Set | Subsets |
 | --- | --- |
@@ -49,11 +51,15 @@ Names are case-insensitive. A whole set (e.g. `rv32I`) expands to all of its sub
 | `rv32A` | — |
 | `rv32F` | — |
 | `rv32D` | — |
-| `rv32C` | — |
-| `rv32B` | — |
+| `rv32C` | — (objdump always disassembles a compressed instruction using its base/pseudo-op alias, e.g. `c.li` prints as `li`, so `isa_profiler.py` resolves it back to its real `c.*` name before counting — see `resolve_compressed_mnemonic()`'s comment in `isa_profiler.py`) |
+| `rv32B` | `zba`, `zbb`, `zbc`, `zbs` (the 4 ratified Bitmanip sub-extensions — each also usable standalone, e.g. `-es zbb`) |
+| `zmmul` | — (the multiply-only subset of `rv32M`; same instructions as `rv32M_mul`, so it's intentionally excluded from `-isa-csv` categorization — see `rv32M_mul` for that breakdown) |
+| `zicond` | — |
+| `zfh` | — |
 | `zicsr` | — |
 | `zifencei` | — |
 | `zicntr` | — |
+| `rv32V` | `rv32V_config`, `rv32V_loads`, `rv32V_stores`, `rv32V_integer`, `rv32V_fixed_point`, `rv32V_float`, `rv32V_reduction`, `rv32V_mask`, `rv32V_permute`, `rv32V_whole_reg` (segment load/store instructions are not included) |
 
 ---
 
