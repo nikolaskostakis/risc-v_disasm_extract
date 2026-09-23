@@ -1,6 +1,6 @@
 # risc-v_disasm_extract
 
-A toolset for working with RISC-V disassembly: `disasm.sh` turns a compiled ELF into a readable disassembly and a hex dump, and `isa_profiler.py` counts instruction occurrences, categorizes them by RISC-V ISA extension (RV32I, RV32M, RV32A, RV32F, RV32D, RV32C, RV32B — split into its Zba/Zbb/Zbc/Zbs sub-extensions — Zmmul, Zicond, Zfh, Zicsr, Zifencei, Zicntr, RV32V), and can extract lines matching specific instructions, or whole ISA sets/subsets, to a separate file.
+A toolset for working with RISC-V disassembly: `disasm.sh` turns a compiled ELF into a readable disassembly and a hex dump, and `isa_profiler.py` counts instruction occurrences and categorizes them by RISC-V ISA extension — the RV32I/M/A/F/D/Q base extensions, RV32B and RV32C's sub-extensions, RV32V, and a range of smaller Z-extensions (bit manipulation, scalar crypto, half/quad-precision and BF16 float, integer-register float, hardware performance counters, and more). See [src/README.md](src/README.md) for the full, current list. `isa_profiler.py` can also extract lines matching specific instructions, or whole ISA sets/subsets, to a separate file.
 
 ## Layout
 
@@ -55,6 +55,7 @@ python src/isa_profiler.py <input_file> [options]  # or -h/--help, -v/--version
 | `-eh`, `--extract-hex` | With `-e`/`-es`: also write `<output_name>.mem`, one extracted instruction's raw bytes per line (little-endian; 4 bytes for a 32-bit instruction, 2 for a compressed one), in the same order as the `.asm` extraction. Warns and does nothing if used without `-e`/`-es` |
 | `-list-sets` | Print the known ISA sets/subsets and exit, with subsets tab-indented beneath their whole set (`input_file` not required) |
 | `-list-instr` | One or more ISA sets/subsets; print the instruction mnemonics they contain (one per line) and exit — same resolution as `-es` (whole-set expansion, case-insensitive, deduplicated), but a static lookup, not filtered by any file (`input_file` not required) |
+| `-list-core` | One or more CPU core names (e.g. `cv32e40p`, `cv32e40x`); print the RISC-V ISA extensions each is known to support and exit — reference data from each core's own user manual, not derived from disassembly (`input_file` not required) |
 | `-v`, `--version` | Print the tool's version and exit (`input_file` not required) |
 
 ### Examples
@@ -105,6 +106,12 @@ List which instructions belong to `rv32M` and `rv32I_shifts` (no input file need
 
 ```bash
 python src/isa_profiler.py -list-instr rv32M rv32I_shifts
+```
+
+Check which ISA extensions a specific core is known to support (no input file needed):
+
+```bash
+python src/isa_profiler.py -list-core cv32e40x
 ```
 
 ## Input format

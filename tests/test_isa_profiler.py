@@ -42,22 +42,47 @@ EXPECTED_INSTRUCTIONS = {
 # complex.asm's expected counts. Every line is genuine objdump output
 # (assembled and disassembled with the real riscv32-unknown-elf toolchain,
 # not hand-typed), covering every ISA extension the tool supports -- RV32I
-# (all subsets), RV32M, RV32A, RV32F, RV32D, compressed (RVC) forms of
-# several base instructions, Zba/Zbb/Zbc/Zbs, Zicond, Zfh, Zicsr,
-# Zifencei, Zicntr, and RV32V -- plus one deliberately unrecognized
-# mnemonic ("reserved0") to exercise the "unknown" bucket. The compressed
-# block resolves to c.li/c.jr (from "ret")/c.beqz/c.and/c.lw/c.swsp (from
-# "sw a1,4(sp)", exercising the sp-base disambiguation) -- see
-# resolve_compressed_mnemonic().
+# (all subsets), RV32M, RV32A, RV32F, RV32D, RV32Q, compressed (RVC)
+# forms of several base instructions, Zba/Zbb/Zbc/Zbs, Zbkb/Zbkx,
+# Zicond, Zfh, Zfa, Zfinx/Zdinx/Zqinx/Zhinx, Zfbfmin, Zicsr, Zifencei,
+# Zicntr, Zihpm, Zca/Zcf/Zcd/Zcb/Zcmp/Zcmt, RV32V, and Zvfbfmin/Zvfbfwma
+# -- plus one deliberately unrecognized mnemonic ("reserved0") to
+# exercise the "unknown" bucket. The compressed block resolves to
+# c.li/c.jr (from "ret")/c.beqz/c.and/c.lw/c.swsp (from "sw a1,4(sp)",
+# exercising the sp-base disambiguation) -- see
+# resolve_compressed_mnemonic(). The hpmcounter3 read resolves to
+# rdhpmcounter3 -- see resolve_zihpm_mnemonic(). Zcmp/Zcmt get their
+# own block since they're encoding-incompatible with Zcd/D (a real ISA
+# constraint, not a fixture quirk). "pack" (Zbkb) and "xperm4" (Zbkx)
+# are both unique to their extension, not part of the zbb/zbc overlap.
+# "fadd.q" gives RV32Q real coverage, same family as
+# fadd.s/fadd.d/fadd.h. "fminm.s" gives Zfa coverage (Zfhmin isn't
+# exercised here, same as zmmul -- it's a pure subset of zfh, already
+# covered structurally by KNOWN_OVERLAPS). The next four fadd.s/d/q/h
+# using integer registers resolve to fadd.s.inx/d.inx/q.inx/h.inx via
+# resolve_inx_mnemonic() -- see that function's docstring for how it
+# tells them apart from the identically-named float-register
+# instructions already in this fixture (Zhinxmin isn't separately
+# exercised, same KNOWN_OVERLAPS reasoning as Zfhmin/Zfh). "fcvt.bf16.s"
+# gives Zfbfmin coverage. The vector block's second vsetvli switches to
+# e16 for vfwcvtbf16.f.f.v/vfncvtbf16.f.f.w (Zvfbfmin) and
+# vfwmaccbf16.vv (Zvfbfwma) -- their mnemonics carry "bf16" directly,
+# so unlike the .inx lines they need no resolver, just their own table
+# entries; "vsetvli" therefore counts 2, not 1.
 EXPECTED_COMPLEX_INSTRUCTIONS = {
     "add": 1, "amoadd.w": 1, "and": 2, "andn": 1, "auipc": 1,
-    "bext": 1, "bne": 1, "c.and": 1, "c.beqz": 1, "c.jr": 1, "c.li": 1,
-    "c.lw": 1, "c.swsp": 1, "clmul": 1, "clz": 1, "csrrw": 1,
-    "czero.eqz": 1, "div": 1, "fadd.d": 1, "fadd.h": 1, "fadd.s": 1,
-    "fence.i": 1, "fmul.s": 1, "jal": 1, "lb": 1, "lr.w": 1, "min": 1,
-    "mul": 2, "rdcycle": 1, "rem": 1, "reserved0": 1, "sb": 1,
-    "sh1add": 1, "slli": 1, "slt": 1, "vadd.vv": 1, "vle32.v": 1,
-    "vmul.vv": 1, "vse32.v": 1, "vsetvli": 1,
+    "bext": 1, "bne": 1, "c.and": 1, "c.beqz": 1, "c.fld": 1,
+    "c.flw": 1, "c.jr": 1, "c.li": 1, "c.lw": 1, "c.swsp": 1,
+    "c.zext.b": 1, "clmul": 1, "clz": 1, "cm.jt": 1, "cm.push": 1,
+    "csrrw": 1, "czero.eqz": 1, "div": 1, "fadd.d": 1, "fadd.d.inx": 1,
+    "fadd.h": 1, "fadd.h.inx": 1, "fadd.q": 1, "fadd.q.inx": 1,
+    "fadd.s": 1, "fadd.s.inx": 1, "fcvt.bf16.s": 1, "fence.i": 1,
+    "fminm.s": 1, "fmul.s": 1, "jal": 1, "lb": 1, "lr.w": 1, "min": 1,
+    "mul": 2, "pack": 1, "rdcycle": 1, "rdhpmcounter3": 1, "rem": 1,
+    "reserved0": 1, "sb": 1, "sh1add": 1, "slli": 1, "slt": 1,
+    "vadd.vv": 1, "vfncvtbf16.f.f.w": 1, "vfwcvtbf16.f.f.v": 1,
+    "vfwmaccbf16.vv": 1, "vle32.v": 1, "vmul.vv": 1, "vse32.v": 1,
+    "vsetvli": 2, "xperm4": 1,
 }
 
 
@@ -170,6 +195,31 @@ class TestResolveCompressedMnemonic(unittest.TestCase):
             ip.resolve_compressed_mnemonic("sw", "a0,8(sp)"), "c.swsp"
         )
 
+    def test_float_loads_stores_share_the_same_sp_disambiguation(self):
+        # flw/fsw (Zcf) and fld/fsd (Zcd) have the exact same
+        # plain-vs-"...sp" split as lw/sw
+        for instr, sp_name in [
+            ("flw", "c.flwsp"), ("fsw", "c.fswsp"),
+            ("fld", "c.fldsp"), ("fsd", "c.fsdsp"),
+        ]:
+            self.assertEqual(
+                ip.resolve_compressed_mnemonic(instr, "fa0,4(a1)"),
+                f"c.{instr}",
+            )
+            self.assertEqual(
+                ip.resolve_compressed_mnemonic(instr, "fa0,8(sp)"),
+                sp_name,
+            )
+
+    def test_cm_mnemonic_returned_unchanged(self):
+        # Zcmp/Zcmt's "cm.*" mnemonics are already complete and real --
+        # objdump doesn't alias them from something else, so they must
+        # NOT get re-prefixed into "c.cm.push"
+        for instr in ("cm.push", "cm.pop", "cm.jt", "cm.jalt"):
+            self.assertEqual(
+                ip.resolve_compressed_mnemonic(instr, "{ra},-16"), instr
+            )
+
     def test_unambiguous_mnemonic_gets_simple_prefix(self):
         self.assertEqual(
             ip.resolve_compressed_mnemonic("li", "a0,5"), "c.li"
@@ -178,23 +228,192 @@ class TestResolveCompressedMnemonic(unittest.TestCase):
             ip.resolve_compressed_mnemonic("ebreak", ""), "c.ebreak"
         )
 
-    def test_every_resolved_name_is_a_known_rv32C_mnemonic(self):
-        # regression guard: every case above (and a few more real ones)
-        # must land on a name that's actually in isa_rv32.rv32C, or
-        # it'll silently fall into the "unknown" bucket instead of
-        # being categorized
+    def test_every_resolved_name_is_a_known_zc_mnemonic(self):
+        # regression guard: every case above (and a few more real ones,
+        # spanning Zca/Zcf/Zcd/Zcb/Zcmp/Zcmt) must land on a name
+        # that's actually in one of those tables, or it'll silently
+        # fall into the "unknown" bucket instead of being categorized
         isa_lists = ip.get_isa_lists()
+        known = (
+            set(isa_lists["zca"]) | set(isa_lists["zcf"])
+            | set(isa_lists["zcd"]) | set(isa_lists["zcb"])
+            | set(isa_lists["zcmp"]) | set(isa_lists["zcmt"])
+        )
         cases = [
             ("ret", ""), ("jr", "a1"), ("jalr", "a1"),
             ("addi", "a0,a0,3"), ("addi", "sp,sp,-16"),
             ("addi", "a1,sp,16"), ("lw", "a0,4(a1)"),
             ("lw", "a0,8(sp)"), ("sw", "a0,4(a1)"), ("sw", "a0,8(sp)"),
+            ("flw", "fa0,4(a1)"), ("flw", "fa0,8(sp)"),
+            ("fsw", "fa0,4(a1)"), ("fsw", "fa0,8(sp)"),
+            ("fld", "fa0,8(a1)"), ("fld", "fa0,16(sp)"),
+            ("fsd", "fa0,8(a1)"), ("fsd", "fa0,16(sp)"),
             ("li", "a0,5"), ("mv", "a0,a1"), ("add", "a0,a0,a1"),
             ("and", "a0,a0,a1"), ("nop", ""), ("ebreak", ""),
+            ("lbu", "a0,1(a1)"), ("lhu", "a0,2(a1)"), ("lh", "a0,2(a1)"),
+            ("sb", "a0,1(a1)"), ("sh", "a0,2(a1)"),
+            ("zext.b", "a0"), ("sext.b", "a0"),
+            ("zext.h", "a0"), ("sext.h", "a0"), ("not", "a0"),
+            ("mul", "a0,a1"),
+            ("cm.push", "{ra},-16"), ("cm.pop", "{ra},16"),
+            ("cm.popret", "{ra},16"), ("cm.popretz", "{ra},16"),
+            ("cm.mva01s", "s0,s1"), ("cm.mvsa01", "s0,s1"),
+            ("cm.jt", "5"), ("cm.jalt", "200"),
         ]
         for instr, operands in cases:
             resolved = ip.resolve_compressed_mnemonic(instr, operands)
-            self.assertIn(resolved, isa_lists["rv32C"], resolved)
+            self.assertIn(resolved, known, resolved)
+
+
+class TestResolveZihpmMnemonic(unittest.TestCase):
+    '''
+    Direct tests of resolve_zihpm_mnemonic()'s CSR-operand
+    disambiguation, verified against real riscv32-unknown-elf-as/
+    objdump output. A hpmcounter3-31 access has no dedicated mnemonic
+    of its own -- it always disassembles as a generic CSR pseudo-op
+    (e.g. "csrr a0,hpmcounter5"), the same text an unrelated CSR
+    access like "csrr a0,mstatus" would produce, so the CSR name has
+    to be read from the operand text instead.
+    '''
+    def test_rd_first_forms_resolve(self):
+        # csrr/csrrs/csrrc/csrrsi/csrrci/csrrw all put the CSR name
+        # second: "<mnemonic> rd,csr[,rs1-or-imm]"
+        for mnemonic, operands in [
+            ("csrr", "a0,hpmcounter5"),
+            ("csrrs", "a0,hpmcounter5,a1"),
+            ("csrrc", "a0,hpmcounter5,a1"),
+            ("csrrsi", "a0,hpmcounter5,3"),
+            ("csrrci", "a0,hpmcounter5,3"),
+            ("csrrw", "a0,hpmcounter5,a1"),
+        ]:
+            self.assertEqual(
+                ip.resolve_zihpm_mnemonic(mnemonic, operands),
+                "rdhpmcounter5",
+                f"{mnemonic} {operands}",
+            )
+
+    def test_csr_first_forms_resolve(self):
+        # csrw/csrs/csrc/csrwi/csrsi/csrci have no destination
+        # register, so the CSR name comes first: "<mnemonic> csr,..."
+        for mnemonic, operands in [
+            ("csrw", "hpmcounter5,a0"),
+            ("csrs", "hpmcounter5,a0"),
+            ("csrc", "hpmcounter5,a0"),
+            ("csrwi", "hpmcounter5,3"),
+            ("csrsi", "hpmcounter5,3"),
+            ("csrci", "hpmcounter5,3"),
+        ]:
+            self.assertEqual(
+                ip.resolve_zihpm_mnemonic(mnemonic, operands),
+                "rdhpmcounter5",
+                f"{mnemonic} {operands}",
+            )
+
+    def test_high_half_gets_h_suffix(self):
+        self.assertEqual(
+            ip.resolve_zihpm_mnemonic("csrr", "a0,hpmcounter3h"),
+            "rdhpmcounter3h",
+        )
+
+    def test_range_boundaries(self):
+        self.assertEqual(
+            ip.resolve_zihpm_mnemonic("csrr", "a0,hpmcounter3"),
+            "rdhpmcounter3",
+        )
+        self.assertEqual(
+            ip.resolve_zihpm_mnemonic("csrr", "a0,hpmcounter31"),
+            "rdhpmcounter31",
+        )
+
+    def test_out_of_range_or_malformed_csr_not_resolved(self):
+        # hpmcounter0-2 aren't real (those are cycle/time/instret by
+        # their own names), and hpmcounter32+ doesn't exist -- both
+        # must fall through unresolved, not be silently mislabeled
+        for operands in ("a0,hpmcounter2", "a0,hpmcounter32"):
+            self.assertEqual(
+                ip.resolve_zihpm_mnemonic("csrr", operands), "csrr"
+            )
+
+    def test_unrelated_csr_not_resolved(self):
+        self.assertEqual(
+            ip.resolve_zihpm_mnemonic("csrr", "a0,mstatus"), "csrr"
+        )
+
+    def test_non_csr_mnemonic_returned_unchanged(self):
+        self.assertEqual(
+            ip.resolve_zihpm_mnemonic("add", "a0,a1,a2"), "add"
+        )
+
+    def test_every_resolved_name_is_a_known_zihpm_mnemonic(self):
+        isa_lists = ip.get_isa_lists()
+        for n in (3, 5, 17, 31):
+            for suffix in ("", "h"):
+                resolved = ip.resolve_zihpm_mnemonic(
+                    "csrr", f"a0,hpmcounter{n}{suffix}"
+                )
+                self.assertIn(resolved, isa_lists["zihpm"], resolved)
+
+
+class TestResolveInxMnemonic(unittest.TestCase):
+    '''
+    Direct tests of resolve_inx_mnemonic()'s float-vs-integer-register
+    disambiguation, verified against real riscv32-unknown-elf-as/
+    objdump output. Zfinx/Zdinx/Zqinx/Zhinx instructions print with the
+    exact same mnemonic text as their F/D/Q/Zfh counterparts (e.g.
+    "fadd.s" either way) -- only the operand register names (an
+    "f"-prefixed ABI name vs a plain integer one) say which.
+    '''
+    def test_float_register_operand_leaves_mnemonic_unchanged(self):
+        self.assertEqual(
+            ip.resolve_inx_mnemonic("fadd.s", "fa0,fa1,fa2"), "fadd.s"
+        )
+
+    def test_integer_register_operands_get_inx_suffix(self):
+        self.assertEqual(
+            ip.resolve_inx_mnemonic("fadd.s", "a0,a1,a2"), "fadd.s.inx"
+        )
+
+    def test_mixed_destination_still_detects_float_source(self):
+        # fcvt.w.s's destination is always an integer register even in
+        # real F (the result of a float-to-int conversion) -- only the
+        # source operand distinguishes F from Zfinx here
+        self.assertEqual(
+            ip.resolve_inx_mnemonic("fcvt.w.s", "a0,fa1"), "fcvt.w.s"
+        )
+        self.assertEqual(
+            ip.resolve_inx_mnemonic("fcvt.w.s", "a0,a1"), "fcvt.w.s.inx"
+        )
+
+    def test_every_width_resolves_to_its_own_inx_family(self):
+        for suffix, table in (
+            ("s", "zfinx"), ("d", "zdinx"),
+            ("q", "zqinx"), ("h", "zhinx"),
+        ):
+            resolved = ip.resolve_inx_mnemonic(
+                f"fadd.{suffix}", "a0,a1,a2"
+            )
+            isa_lists = ip.get_isa_lists()
+            self.assertIn(resolved, isa_lists[table], resolved)
+
+    def test_loads_stores_and_bitmoves_have_no_inx_form(self):
+        # flw/fsw/fmv.x.w/fmv.w.x etc have no "inx" counterpart at all
+        # (there's no separate register file to load into/store from,
+        # or to reinterpret bits between) -- must never be relabeled,
+        # even though their own operands don't include an
+        # "f"-prefixed one either (a load's base register is always
+        # a plain integer register, real F included)
+        for instr, operands in [
+            ("flw", "fa0,4(a1)"), ("fsw", "fa0,4(a1)"),
+            ("fmv.x.w", "a0,fa1"), ("fmv.w.x", "fa0,a1"),
+        ]:
+            self.assertEqual(
+                ip.resolve_inx_mnemonic(instr, operands), instr
+            )
+
+    def test_unrelated_mnemonic_returned_unchanged(self):
+        self.assertEqual(
+            ip.resolve_inx_mnemonic("add", "a0,a1,a2"), "add"
+        )
 
 
 class TestGetIsaLists(unittest.TestCase):
@@ -213,8 +432,19 @@ class TestGetIsaLists(unittest.TestCase):
 
     # zmmul is intentionally == rv32M_mul (Zmmul is a real, spec-defined
     # subset of M, not a miscategorization like zext.h was) -- see
-    # get_isa_lists()'s comment on zmmul.
-    KNOWN_OVERLAPS = {frozenset({"zmmul", "rv32M_mul"})}
+    # get_isa_lists()'s comment on zmmul. zbkb/zbkc are the same kind
+    # of real, spec-defined overlap with zbb/zbc (the scalar-crypto
+    # subsets of Bitmanip), zfhmin/zfh likewise (Zfhmin is Zfh's
+    # minimal load/store/conversion-only subset), and zhinxmin/zhinx
+    # the same again one level down (Zhinxmin is Zhinx's equivalent
+    # minimal subset) -- see isa_rv32.py's comments on them.
+    KNOWN_OVERLAPS = {
+        frozenset({"zmmul", "rv32M_mul"}),
+        frozenset({"zbkb", "zbb"}),
+        frozenset({"zbkc", "zbc"}),
+        frozenset({"zfhmin", "zfh"}),
+        frozenset({"zhinxmin", "zhinx"}),
+    }
 
     def test_no_unexpected_instruction_overlap_across_sets(self):
         seen = {}
@@ -229,6 +459,46 @@ class TestGetIsaLists(unittest.TestCase):
                         "and this isn't a documented, intentional overlap"
                     )
                 seen[instr] = set_name
+
+
+class TestCoreProfiles(unittest.TestCase):
+    '''
+    Structural checks on isa_rv32.CORE_PROFILES, the reference data
+    behind -list-core. Unlike get_isa_lists()'s tables, this isn't
+    derived from real objdump output (a specific core's RTL config
+    isn't something a generic toolchain can tell us), so these are
+    schema/typo guards rather than behavioral tests.
+    '''
+    def setUp(self):
+        self.isa_lists = ip.get_isa_lists()
+        self.core_profiles = ip.isa_rv32.CORE_PROFILES
+
+    def test_every_profile_has_required_fields(self):
+        for name, profile in self.core_profiles.items():
+            self.assertIn("source", profile, name)
+            self.assertTrue(profile["source"].startswith("http"), name)
+            self.assertIn("base", profile, name)
+            self.assertTrue(len(profile["base"]) > 0, name)
+            self.assertIn("always", profile, name)
+            self.assertTrue(len(profile["always"]) > 0, name)
+
+    def test_single_word_entries_are_known_extension_names(self):
+        # a list entry with no spaces is a bare extension name meant
+        # to resolve via this tool's own -es/-list-instr lookup (e.g.
+        # "zicsr", or a whole-set name like "rv32I" that only expands
+        # via prefix matching, not a literal isa_lists key), as
+        # opposed to a free-text/prose note (e.g. "rv32M or
+        # zmmul-only (config: M_EXT)") -- every bare one must actually
+        # resolve to something, or it's a typo nobody would notice
+        for name, profile in self.core_profiles.items():
+            for key in ("base", "always", "optional", "not_supported"):
+                for item in profile.get(key, []):
+                    if " " in item:
+                        continue
+                    resolved = ip.get_setInstr([item], self.isa_lists)
+                    self.assertTrue(
+                        len(resolved) > 0, f"{name}.{key}: {item}"
+                    )
 
 
 class TestGetSetInstr(unittest.TestCase):
@@ -291,6 +561,18 @@ class TestGetSetInstr(unittest.TestCase):
         # part of the rv32B umbrella
         result = ip.get_setInstr(["Zba"], self.isa_lists)
         self.assertEqual(sorted(result), sorted(self.isa_lists["zba"]))
+
+    def test_zce_umbrella_expands_to_zca_zcb_zcmp_zcmt(self):
+        # Zce is the embedded-profile code-size-reduction bundle --
+        # verified against the real assembler to be exactly these four
+        # and nothing more (notably not Zcf/Zcd, unlike rv32C's own
+        # umbrella)
+        result = set(ip.get_setInstr(["zce"], self.isa_lists))
+        expected = set()
+        for member in ("zca", "zcb", "zcmp", "zcmt"):
+            expected.update(self.isa_lists[member])
+        self.assertEqual(result, expected)
+        self.assertTrue(len(expected) > 0)
 
 
 class TestExtractHex(unittest.TestCase):
@@ -377,23 +659,27 @@ class TestComplexFixture(unittest.TestCase):
             "rv32I_comparisons", "rv32I_jumps", "rv32I_branches",
             "rv32I_loads", "rv32I_stores", "rv32I_other",
             "rv32M_mul", "rv32M_div", "rv32M_rem",
-            "rv32A", "rv32F", "rv32D", "rv32C",
-            "zba", "zbb", "zbc", "zbs",
-            "zicond", "zfh", "zicsr", "zifencei", "zicntr",
+            "rv32A", "rv32F", "rv32D", "rv32Q",
+            "zba", "zbb", "zbc", "zbs", "zbkb", "zbkx",
+            "zicond", "zfh", "zfa", "zfinx", "zdinx", "zqinx", "zhinx",
+            "zfbfmin",
+            "zicsr", "zifencei", "zicntr",
+            "zihpm",
+            "zca", "zcf", "zcd", "zcb", "zcmp", "zcmt",
             "rv32V_config", "rv32V_loads", "rv32V_stores",
-            "rv32V_integer",
+            "rv32V_integer", "zvfbfmin", "zvfbfwma",
         ]
         for name in expected_nonzero:
             self.assertGreater(
                 categorized[name], 0, f"{name} should have matched"
             )
 
-    def test_rv32C_matches_resolved_compressed_instructions(self):
-        # the fixture's six compressed instances (c.li, c.jr, c.beqz,
-        # c.and, c.lw, c.swsp) all resolve to real rv32C mnemonics, so
-        # rv32C's count reflects exactly them, not 0
+    def test_zca_matches_resolved_compressed_instructions(self):
+        # the fixture's six Zca-only compressed instances (c.li, c.jr,
+        # c.beqz, c.and, c.lw, c.swsp) all resolve to real zca
+        # mnemonics, so zca's count reflects exactly them, not 0
         categorized = ip.save_instuction_sets(self.instructions)
-        self.assertEqual(categorized["rv32C"], 6)
+        self.assertEqual(categorized["zca"], 6)
 
     def test_unknown_instruction_is_isolated(self):
         categorized = ip.save_instuction_sets(self.instructions)
@@ -422,6 +708,25 @@ class TestCli(unittest.TestCase):
         printed = result.stdout.split()
         for instr in ["sll", "slli", "srl", "srli", "sra", "srai"]:
             self.assertIn(instr, printed)
+
+    def test_list_core_no_names_errors(self):
+        result = self.run_cli(["-list-core"])
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_list_core_prints_known_cores(self):
+        result = self.run_cli(["-list-core", "cv32e40p", "cv32e40x"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("cv32e40p", result.stdout)
+        self.assertIn("cv32e40x", result.stdout)
+        # cv32e40p: standard RISC-V M/C are always present
+        self.assertIn("rv32M", result.stdout)
+        # cv32e40x: Zc-family extensions are always present
+        self.assertIn("zcmp", result.stdout)
+
+    def test_list_core_unknown_core_warns_not_crashes(self):
+        result = self.run_cli(["-list-core", "bogus_core_xyz"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Unknown core", result.stderr)
 
     def test_unmatched_extract_name_warns_not_crashes(self):
         name = "unittest_cli_extract_tmp"

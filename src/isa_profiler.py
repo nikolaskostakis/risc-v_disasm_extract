@@ -2,7 +2,7 @@
 RISC-V instruction counter and ISA extension profiler
 """
 __author__ = "Nikolaos Kostakis"
-__version__ = "1.4"
+__version__ = "1.5"
 
 import os
 import sys
@@ -14,16 +14,16 @@ import string
 from io import TextIOWrapper
 from logging import Logger
 import isa_rv32
-from isa_rv32 import HEX_MNEMONICS, ISA_UMBRELLAS
+from isa_rv32 import HEX_MNEMONICS, ISA_UMBRELLAS, CORE_PROFILES
 
 def setupLogger() -> Logger:
     '''
     Set up and configure the logging system with colored output.
-    
+
     Creates a logger with a custom ANSI color formatter that provides colored
     output for different log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     The logger is configured to output to stdout with DEBUG level.
-    
+
     :return: Configured logger instance
     :rtype: Logger
     '''
@@ -44,7 +44,7 @@ def setupLogger() -> Logger:
             }.get(record.levelname, no_style)
             end_style = no_style
             return f'{start_style}{super().format(record)}{end_style}'
-    
+
     logger = logging.getLogger()
 
     handler = logging.StreamHandler()
@@ -53,19 +53,16 @@ def setupLogger() -> Logger:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG) # DEBUG INFO WARNING ERROR CRITICAL
-    #logging.basicConfig(
-    #    level=logging.DEBUG, format='%(levelname)s: %(message)s'
-    #)
-    
+
     return logger
 
 def setupArgeparse() -> argparse.ArgumentParser:
     '''
     Set up and configure the command-line argument parser.
-    
+
     Creates an ArgumentParser with the following arguments:
     - input_file: Positional argument for the assembly file to parse (not
-      required when -list-sets or -list-instr is given)
+      required when -list-sets, -list-instr, or -list-core is given)
     - -o/--output-name: Optional base name for output files
     - -csv: Flag to save raw instruction counts to CSV
     - -e/--extract: List of instructions to extract to a separate file
@@ -77,6 +74,8 @@ def setupArgeparse() -> argparse.ArgumentParser:
     - -list-sets: Flag to print the known ISA sets/subsets and exit
     - -list-instr: List of ISA sets/subsets whose instructions should be
       printed, one per line, and exit
+    - -list-core: List of CPU core names whose known ISA extensions
+      should be printed, and exit
     - --version: Flag to print the tool's version and exit
 
     :return: Configured argument parser
@@ -156,6 +155,15 @@ def setupArgeparse() -> argparse.ArgumentParser:
         help="Print the instructions in the given ISA sets/subsets and exit"
     )
 
+    parser.add_argument(
+        "-list-core",
+        nargs="*",
+        metavar="core1, core2,",
+        default=None,
+        help="Print the known ISA extensions for the given CPU core(s) "
+             "and exit"
+    )
+
     return parser
 
 def out_path(
@@ -179,10 +187,10 @@ def out_path(
 def get_filePointer(fileName:str) -> TextIOWrapper:
     '''
     Open and return a file pointer for the specified assembly file.
-    
+
     Attempts to open the file in read mode. If the file is not found,
     logs an error message and exits the program.
-    
+
     :param fileName: Path to the assembly file to open
     :type fileName: str
     :return: File pointer to the opened file
@@ -202,7 +210,7 @@ def get_filePointer(fileName:str) -> TextIOWrapper:
 def resolve_compressed_mnemonic(instr: str, operands: str) -> str:
     '''
     Map a compressed (RVC) instruction's displayed objdump mnemonic to
-    its real "c.*" name.
+    its real "c.*"/"cm.*" name.
 
     objdump always disassembles a compressed instruction using its
     base/pseudo-op alias, and for a few instructions that alias is
@@ -211,20 +219,27 @@ def resolve_compressed_mnemonic(instr: str, operands: str) -> str:
     - "addi" covers three different real instructions: c.addi16sp
       (destination and source are both literally "sp"), c.addi4spn
       (only the source is "sp"), and plain c.addi (neither is)
-    - "lw"/"sw" each cover two real instructions -- c.lwsp/c.swsp when
-      the memory operand's base register is literally "sp", else
-      plain c.lw/c.sw
-    Every other compressed instruction's displayed mnemonic maps 1:1
-    onto its real "c.*" name by simple prefixing.
+    - "lw"/"sw"/"flw"/"fsw"/"fld"/"fsd" each cover two real
+      instructions -- the "...sp" (Zcf/Zcd/Zca stack-pointer) form
+      when the memory operand's base register is literally "sp", else
+      the plain (general-base) form
+    Most other compressed instructions' displayed mnemonics map 1:1
+    onto their real "c.*" name by simple prefixing. Zcmp/Zcmt's
+    "cm.*" mnemonics are the exception to even that: objdump already
+    prints their real, complete name, so they're returned unchanged
+    rather than re-prefixed into nonsense like "c.cm.push".
 
     :param instr: The mnemonic objdump printed (e.g. "addi", "ret")
     :type instr: str
     :param operands: The raw operand text following the mnemonic, with
                       no whitespace (objdump's own format)
     :type operands: str
-    :return: The instruction's real "c.*" mnemonic
+    :return: The instruction's real "c.*"/"cm.*" mnemonic
     :rtype: str
     '''
+    if instr.startswith("cm."):
+        return instr
+
     if instr == "ret":
         return "c.jr"
 
@@ -236,13 +251,122 @@ def resolve_compressed_mnemonic(instr: str, operands: str) -> str:
             return "c.addi4spn"
         return "c.addi"
 
-    if instr in ("lw", "sw"):
+    if instr in ("lw", "sw", "flw", "fsw", "fld", "fsd"):
         base = operands.rsplit("(", 1)[-1].rstrip(")")
         if base == "sp":
             return f"c.{instr}sp"
         return f"c.{instr}"
 
     return f"c.{instr}"
+
+# CSR pseudo-ops with an explicit destination register, where the CSR
+# name is the second comma-separated operand (e.g. "csrr a0,mstatus")
+_CSR_MNEMONICS_RD_FIRST = {
+    "csrr", "csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci",
+}
+# CSR pseudo-ops with no destination register (implicitly x0), where
+# the CSR name is the first operand (e.g. "csrw hpmcounter5,a0")
+_CSR_MNEMONICS_CSR_FIRST = {
+    "csrw", "csrs", "csrc", "csrwi", "csrsi", "csrci",
+}
+
+def resolve_zihpm_mnemonic(instr: str, operands: str) -> str:
+    '''
+    Map a Zihpm hardware-performance-counter CSR access to a
+    "rdhpmcounter<N>" (or "...h" for the RV32 upper half) label.
+
+    Unlike Zicntr's cycle/time/instret, which objdump aliases to their
+    own pseudo-op names (rdcycle etc.), a hpmcounter3-31 CSR access has
+    no dedicated mnemonic -- it always disassembles as a generic CSR
+    pseudo-op (e.g. "csrr a0,hpmcounter5"), indistinguishable by
+    mnemonic text from any other CSR access (e.g. "csrr a0,mstatus").
+    The CSR name has to be read from the operand text instead, at a
+    position that depends on whether the pseudo-op has an explicit
+    destination register (see _CSR_MNEMONICS_RD_FIRST/_CSR_FIRST).
+
+    Every real access form (csrr, csrrs, csrrsi, csrw, ...) to the same
+    counter collapses to one label, since a real 32-bit hpmcounter
+    read/write is never meaningfully different from another for
+    counting purposes here -- mirrors rdcycle/rdcycleh's single name
+    per counter rather than one per instruction form.
+
+    :param instr: The mnemonic objdump printed (e.g. "csrr", "csrw")
+    :type instr: str
+    :param operands: The raw operand text following the mnemonic, with
+                      no whitespace (objdump's own format)
+    :type operands: str
+    :return: "rdhpmcounter<N>"/"rdhpmcounter<N>h" if this is a Zihpm
+             CSR access, otherwise instr unchanged
+    :rtype: str
+    '''
+    if instr in _CSR_MNEMONICS_RD_FIRST:
+        parts = operands.split(",")
+        csr = parts[1] if len(parts) > 1 else ""
+    elif instr in _CSR_MNEMONICS_CSR_FIRST:
+        csr = operands.split(",")[0]
+    else:
+        return instr
+
+    if not csr.startswith("hpmcounter"):
+        return instr
+
+    suffix = csr[len("hpmcounter"):]
+    isHigh = suffix.endswith("h")
+    number = suffix[:-1] if isHigh else suffix
+    if not number.isdigit() or not (3 <= int(number) <= 31):
+        return instr
+
+    return f"rdhpmcounter{number}" + ("h" if isHigh else "")
+
+# Every "<mnemonic>.inx" label that appears in isa_rv32's zfinx/zdinx/
+# zqinx/zhinx tables -- i.e. the set of real "<mnemonic>.inx" suffixed
+# names resolve_inx_mnemonic() is allowed to produce. Derived directly
+# from those tables (the single source of truth for which mnemonics
+# have an "inx" counterpart) rather than duplicated here.
+_INX_SUFFIXED = (
+    set(isa_rv32.zfinx) | set(isa_rv32.zdinx)
+    | set(isa_rv32.zqinx) | set(isa_rv32.zhinx)
+)
+
+def resolve_inx_mnemonic(instr: str, operands: str) -> str:
+    '''
+    Map an F/D/Q/Zfh-family instruction using integer registers to its
+    "<mnemonic>.inx" label (Zfinx/Zdinx/Zqinx/Zhinx/Zhinxmin).
+
+    Under Zfinx and its siblings, there's no separate floating-point
+    register file -- the same F/D/Q/Zfh instructions read and write
+    the integer registers instead. objdump prints the exact same
+    mnemonic text either way (e.g. "fadd.s" whether it used fa0/fa1
+    or a0/a1), so the only way to tell them apart is the operand
+    text: a real F/D/Q/Zfh instruction always has at least one
+    "f"-prefixed register operand (fa0, ft1, fs2, ...), since RISC-V's
+    float ABI register names all start with "f" and its integer ones
+    never do; an "inx" instruction has none.
+
+    Loads/stores (flw, fld, ...) and the direct GPR<->FPR bit-move
+    instructions (fmv.x.w, fmv.w.x, ...) have no "inx" equivalent at
+    all -- see isa_rv32.py's _NO_INX_EQUIVALENT -- so they're left
+    alone even though they also lack an "f"-prefixed operand in their
+    own right (their destination is already an integer register in
+    the real F/D/Q/Zfh form too).
+
+    :param instr: The mnemonic objdump printed (e.g. "fadd.s")
+    :type instr: str
+    :param operands: The raw operand text following the mnemonic, with
+                      no whitespace (objdump's own format)
+    :type operands: str
+    :return: "<mnemonic>.inx" if this is an inx-family instruction,
+             otherwise instr unchanged
+    :rtype: str
+    '''
+    suffixed = f"{instr}.inx"
+    if suffixed not in _INX_SUFFIXED:
+        return instr
+
+    if any(tok.startswith("f") for tok in operands.split(",")):
+        return instr
+
+    return suffixed
 
 def get_asmInstr(
     filePointer:TextIOWrapper
@@ -265,7 +389,11 @@ def get_asmInstr(
     A compressed (RVC) instruction is counted under its real "c.*"
     mnemonic (see resolve_compressed_mnemonic()), kept separate from
     its 32-bit counterpart even though objdump prints both the same way
-    (e.g. c.li and li both print as "li").
+    (e.g. c.li and li both print as "li"). A Zihpm hardware-performance-
+    counter CSR access is counted under "rdhpmcounter<N>"/"...h" (see
+    resolve_zihpm_mnemonic()), kept separate from an unrelated CSR
+    access even though both print as the same generic CSR pseudo-op
+    (e.g. "csrr a0,hpmcounter5" and "csrr a0,mstatus" both print "csrr").
 
     :param filePointer: Open file pointer to the assembly file
     :type filePointer: TextIOWrapper
@@ -298,16 +426,19 @@ def get_asmInstr(
                 and all(c in string.hexdigits for c in opcode)
             )
             if is_valid_opcode:
+                operands = splitLine[3] if len(splitLine) > 3 else ""
                 if len(opcode) == 4:
-                    operands = splitLine[3] if len(splitLine) > 3 else ""
                     instr = resolve_compressed_mnemonic(instr, operands)
+                else:
+                    instr = resolve_zihpm_mnemonic(instr, operands)
+                    instr = resolve_inx_mnemonic(instr, operands)
 
                 if instr not in instructions:
                     instructions.update({instr:1})
                 else:
                     instructions[instr] = instructions[instr] + 1
 
-    
+
     instructions = {
         k: v for k, v in sorted(
             instructions.items(), key=lambda item: item[0]
@@ -343,7 +474,7 @@ def get_splitInstr(
                 f"Instruction \"{instr}\" is not present in the file..."
             )
             newlist.remove(instr)
-    
+
     return newlist
 
 def save_intructions(
@@ -352,11 +483,11 @@ def save_intructions(
 ) -> None:
     '''
     Save raw instruction counts to a CSV file.
-    
+
     Creates a CSV file with instruction names in the first row and their
     corresponding counts in the second row. Uses the provided output name
     as a base for the filename if specified.
-    
+
     :param instructions: Dictionary of instruction counts
     :type instructions: dict
     :param output_name: Base name for the output file (optional)
@@ -382,12 +513,12 @@ def save_isa_sets_to_csv(
 ) -> None:
     '''
     Save ISA instruction set counts to a CSV file.
-    
+
     Creates a CSV file with ISA set names in the first row and their
     corresponding counts in the second row. Unknown instructions are
     flattened with "unknown_" prefix. Uses the provided output name
     as a base for the filename if specified.
-    
+
     :param isa_sets: Dictionary with ISA set names and their counts
     :type isa_sets: dict
     :param output_name: Base name for the output file (optional)
@@ -401,7 +532,7 @@ def save_isa_sets_to_csv(
     # Build lists for CSV rows
     names = []
     counts = []
-    
+
     for set_name, count in isa_sets.items():
         if isinstance(count, dict):
             # Handle unknown instructions (nested dict)
@@ -452,19 +583,49 @@ def get_isa_lists() -> dict[str, list[str]]:
         "rv32A": isa_rv32.rv32A,
         "rv32F": isa_rv32.rv32F,
         "rv32D": isa_rv32.rv32D,
-        "rv32C": isa_rv32.rv32C,
+        "rv32Q": isa_rv32.rv32Q,
         # RV32B's 4 ratified sub-extensions -- see ISA_UMBRELLAS for how
         # "rv32B" maps to these
         "zba": isa_rv32.zba,
         "zbb": isa_rv32.zbb,
         "zbc": isa_rv32.zbc,
         "zbs": isa_rv32.zbs,
+        # Scalar-crypto bitmanip -- zbb/zbc must stay listed above these
+        # so they claim the instructions zbkb/zbkc intentionally share
+        # with them first (same reasoning as zmmul below)
+        "zbkb": isa_rv32.zbkb,
+        "zbkc": isa_rv32.zbkc,
+        "zbkx": isa_rv32.zbkx,
         "zmmul": isa_rv32.zmmul,
         "zicond": isa_rv32.zicond,
         "zfh": isa_rv32.zfh,
+        # zfh must stay listed above this so it claims the 8
+        # instructions zfhmin intentionally shares with it first (same
+        # reasoning as zmmul above)
+        "zfhmin": isa_rv32.zfhmin,
+        "zfa": isa_rv32.zfa,
+        "zfinx": isa_rv32.zfinx,
+        "zdinx": isa_rv32.zdinx,
+        "zqinx": isa_rv32.zqinx,
+        "zhinx": isa_rv32.zhinx,
+        # zhinx must stay listed above this so it claims the 4
+        # instructions zhinxmin intentionally shares with it first
+        # (same reasoning as zfhmin/zfh above)
+        "zhinxmin": isa_rv32.zhinxmin,
+        "zfbfmin": isa_rv32.zfbfmin,
         "zicsr": isa_rv32.zicsr,
         "zifencei": isa_rv32.zifencei,
         "zicntr": isa_rv32.zicntr,
+        "zihpm": isa_rv32.zihpm,
+        # RV32C's 3 real sub-extensions -- see ISA_UMBRELLAS for how
+        # "rv32C" maps to these
+        "zca": isa_rv32.zca,
+        "zcf": isa_rv32.zcf,
+        "zcd": isa_rv32.zcd,
+        # Separate Zc-family extensions, not part of the rv32C umbrella
+        "zcb": isa_rv32.zcb,
+        "zcmp": isa_rv32.zcmp,
+        "zcmt": isa_rv32.zcmt,
         # RV32V grouped by functional category, like RV32I/RV32M
         "rv32V_config": isa_rv32.rv32V_config,
         "rv32V_loads": isa_rv32.rv32V_loads,
@@ -476,6 +637,9 @@ def get_isa_lists() -> dict[str, list[str]]:
         "rv32V_mask": isa_rv32.rv32V_mask,
         "rv32V_permute": isa_rv32.rv32V_permute,
         "rv32V_whole_reg": isa_rv32.rv32V_whole_reg,
+        # Separate vector extensions, not part of the rv32V umbrella
+        "zvfbfmin": isa_rv32.zvfbfmin,
+        "zvfbfwma": isa_rv32.zvfbfwma,
     }
 
 def print_isa_lists(isa_lists: dict[str, list[str]]) -> None:
@@ -518,6 +682,44 @@ def print_isa_lists(isa_lists: dict[str, list[str]]) -> None:
                 print(f"\t{sub} ({len(isa_lists[sub])} instructions)")
         else:
             print(f"{name} ({len(isa_lists[name])} instructions)")
+
+def print_core_extensions(core_names: list[str]) -> None:
+    '''
+    Print the known RISC-V ISA extensions for one or more named CPU
+    cores, from isa_rv32.CORE_PROFILES.
+
+    Matching is case-insensitive. This is reference data about
+    specific silicon/RTL designs (see CORE_PROFILES's comment for
+    sourcing), not something derived from get_isa_lists() or real
+    disassembly. Extension names shown match this tool's own
+    -es/-list-instr keys wherever a matching table exists, so they can
+    be used directly with those flags. A name that matches no known
+    core is logged as a warning and skipped.
+
+    :param core_names: Core names to look up
+    :type core_names: list[str]
+    '''
+    for name in core_names:
+        profile = CORE_PROFILES.get(name.lower())
+        if profile is None:
+            logging.warning(f'Unknown core "{name}", skipping...')
+            continue
+
+        print(name)
+        for label, key in (
+            ("base", "base"),
+            ("always", "always"),
+            ("optional", "optional"),
+            ("not supported", "not_supported"),
+            ("custom (not tracked by this tool)", "custom"),
+        ):
+            items = profile.get(key)
+            if not items:
+                continue
+            print(f"\t{label}:")
+            for item in items:
+                print(f"\t\t{item}")
+        print(f"\tsource: {profile['source']}")
 
 def save_instuction_sets(
     instructions: dict
@@ -630,10 +832,11 @@ def extractInstr(
     Reads through the assembly file and writes lines containing the specified
     instructions to '<output_name>.asm', or 'extraction.asm' if no output
     name is given. Only includes lines that match the expected format and
-    contain instructions from the provided list. A compressed (RVC) line is
-    matched against its real "c.*" mnemonic (see
-    resolve_compressed_mnemonic()), same as get_asmInstr(), even though the
-    written line keeps objdump's own displayed text unchanged.
+    contain instructions from the provided list. A compressed (RVC) line or
+    a Zihpm hpmcounter CSR access is matched against its real resolved
+    mnemonic (see resolve_compressed_mnemonic()/resolve_zihpm_mnemonic()),
+    same as get_asmInstr(), even though the written line keeps objdump's
+    own displayed text unchanged.
 
     :param instrList: List of instruction mnemonics to extract
     :type instrList: list
@@ -664,12 +867,14 @@ def extractInstr(
                 and all(c in string.hexdigits for c in opcode)
             )
             if is_valid_opcode:
-                matchInstr = instr
+                operands = splitLine[3] if len(splitLine) > 3 else ""
                 if len(opcode) == 4:
-                    operands = splitLine[3] if len(splitLine) > 3 else ""
                     matchInstr = resolve_compressed_mnemonic(
                         instr, operands
                     )
+                else:
+                    matchInstr = resolve_zihpm_mnemonic(instr, operands)
+                    matchInstr = resolve_inx_mnemonic(matchInstr, operands)
 
                 if matchInstr in instrList:
                     fp.write(' '.join(splitLine[2:])+'\n')
@@ -694,9 +899,10 @@ def extractHex(
     own <name>.mem, so the two stay consistent. A line has 4 bytes for a
     32-bit instruction or 2 bytes for a 16-bit compressed (RVC) one, so
     lines are not fixed-width -- each carries exactly the instruction's
-    real encoded size. A compressed line is matched against its real
-    "c.*" mnemonic, same as get_asmInstr() -- see
-    resolve_compressed_mnemonic().
+    real encoded size. A compressed line or a Zihpm hpmcounter CSR
+    access is matched against its real resolved mnemonic, same as
+    get_asmInstr() -- see resolve_compressed_mnemonic()/
+    resolve_zihpm_mnemonic().
 
     :param instrList: List of instruction mnemonics to extract
     :type instrList: list
@@ -727,9 +933,15 @@ def extractHex(
                 and all(c in string.hexdigits for c in opcode)
             )
             matchInstr = instr
-            if is_valid_opcode and len(opcode) == 4:
+            if is_valid_opcode:
                 operands = splitLine[3] if len(splitLine) > 3 else ""
-                matchInstr = resolve_compressed_mnemonic(instr, operands)
+                if len(opcode) == 4:
+                    matchInstr = resolve_compressed_mnemonic(
+                        instr, operands
+                    )
+                else:
+                    matchInstr = resolve_zihpm_mnemonic(instr, operands)
+                    matchInstr = resolve_inx_mnemonic(matchInstr, operands)
 
             if is_valid_opcode and matchInstr in instrList:
                 beBytes = bytes.fromhex(opcode)
@@ -743,11 +955,11 @@ def extractHex(
 def main():
     '''
     Main entry point for the RISC-V assembly parser.
-    
+
     Orchestrates the parsing process:
     1. Sets up logging and parses command-line arguments
-    2. If -list-sets or -list-instr was given, prints the requested ISA
-       set/instruction info and exits
+    2. If -list-sets, -list-instr, or -list-core was given, prints the
+       requested ISA set/instruction/core info and exits
     3. Opens and parses the assembly file
     4. Optionally saves raw instruction counts to CSV
     5. Optionally extracts specific instructions (and their hexdump, with -eh)
@@ -755,24 +967,7 @@ def main():
     6. Optionally categorizes instructions by ISA extension and saves the
        counts to CSV
 
-    Command-line usage:
-    python isa_profiler.py input_file [options]
-
-    Options:
-    -o OUTPUT_NAME    Base name for output files
-    -csv              Save raw instruction counts to CSV
-    -isa-csv          Save ISA instruction set counts to CSV
-    -e INSTR...       Extract specific instructions to file
-    -es SET...        Extract instructions from ISA sets/subsets to file
-    -eh               Also write a hexdump of the extracted instructions
-                      (no-op, with a warning, if used without -e/-es)
-    -list-sets        Print the known ISA sets/subsets and exit
-                      (no input_file needed)
-    -list-instr SET...  Print the instructions in the given set(s)/
-                      subset(s), one per line, and exit
-                      (no input_file needed)
-    --version         Print the tool's version and exit
-                      (no input_file needed)
+    See setupArgeparse() for the full flag list, or run with -h/--help.
     '''
     logger = setupLogger()
     parser = setupArgeparse()
@@ -798,6 +993,14 @@ def main():
             return
         for instr in instrs:
             print(instr)
+        return
+
+    # -list-core: print the known ISA extensions for the given CPU
+    # core(s) and exit, no file needed
+    if args.list_core is not None:
+        if len(args.list_core) == 0:
+            parser.error("-list-core requires at least one core name")
+        print_core_extensions(args.list_core)
         return
 
     # everything below here parses an actual assembly file

@@ -42,6 +42,19 @@ Disassembly of section .text:
   78:	30059573          	csrrw	a0,mstatus,a1
   7c:	0000100f          	fence.i
   80:	c0002573          	rdcycle	a0
+  84:	c0302573          	csrr	a0,hpmcounter3
+  88:	61c8                	flw	fa0,4(a1)
+  8a:	2588                	fld	fa0,8(a1)
+  8c:	9d61                	zext.b	a0,a0
+  90:	08c5c533          	pack	a0,a1,a2
+  94:	28c5a533          	xperm4	a0,a1,a2
+  98:	06c5f553          	fadd.q	fa0,fa1,fa2
+  9c:	28c5a553          	fminm.s	fa0,fa1,fa2
+  a0:	00c5f553          	fadd.s	a0,a1,a2
+  a4:	02e67553          	fadd.d	a0,a2,a4
+  a8:	06e67553          	fadd.q	a0,a2,a4
+  ac:	04c5f553          	fadd.h	a0,a1,a2
+  b0:	4485f553          	fcvt.bf16.s	fa0,fa1
 
 
 
@@ -53,4 +66,16 @@ Disassembly of section .text:
    8:	02056087          	vle32.v	v1,(a0)
    c:	020560a7          	vse32.v	v1,(a0)
   10:	9621a0d7          	vmul.vv	v1,v2,v3
-  14:	abcdef01          	reserved0	a0,a1
+  14:	0c8072d7          	vsetvli	t0,zero,e16,m1,ta,ma
+  18:	4a2690d7          	vfwcvtbf16.f.f.v	v1,v2
+  1c:	4a2e90d7          	vfncvtbf16.f.f.w	v1,v2
+  20:	ee3110d7          	vfwmaccbf16.vv	v1,v2,v3
+
+
+
+Disassembly of section .text:
+
+00000000 <_start>:
+   0:	b842                	cm.push	{ra},-16
+   2:	a016                	cm.jt	5
+   4:	abcdef01          	reserved0	a0,a1
