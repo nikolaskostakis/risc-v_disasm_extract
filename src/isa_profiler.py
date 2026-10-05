@@ -70,6 +70,8 @@ def setupArgeparse() -> argparse.ArgumentParser:
       separate file
     - -eh/--extract-hex: Flag to also write a hexdump of the extracted
       instructions (warns and does nothing without -e/-es)
+    - -endian/--endian: Byte order for the -eh hexdump, "little"
+      (default) or "big" (warns and has no effect without -eh)
     - -isa-csv: Flag to save ISA instruction set counts to CSV
     - -list-sets: Flag to print the known ISA sets/subsets and exit
     - -list-instr: List of ISA sets/subsets whose instructions should be
@@ -133,6 +135,14 @@ def setupArgeparse() -> argparse.ArgumentParser:
         "-eh", "--extract-hex",
         action="store_true",
         help="Also write a hexdump of the extracted instructions (with -e/-es)"
+    )
+
+    parser.add_argument(
+        "-endian", "--endian",
+        choices=["little", "big"],
+        default="little",
+        help="Byte order for the -eh/--extract-hex hexdump (default: little, "
+             "the real RV32 memory byte order)"
     )
 
     parser.add_argument(
@@ -576,7 +586,9 @@ def get_isa_lists() -> dict[str, list[str]]:
         "rv32I_branches": isa_rv32.rv32I_branches,
         "rv32I_loads": isa_rv32.rv32I_loads,
         "rv32I_stores": isa_rv32.rv32I_stores,
-        "rv32I_other": isa_rv32.rv32I_other,
+        "rv32I_upper_imm": isa_rv32.rv32I_upper_imm,
+        "rv32I_fence": isa_rv32.rv32I_fence,
+        "rv32I_env": isa_rv32.rv32I_env,
         "rv32M_mul": isa_rv32.rv32M_mul,
         "rv32M_div": isa_rv32.rv32M_div,
         "rv32M_rem": isa_rv32.rv32M_rem,
@@ -886,22 +898,28 @@ def extractInstr(
 def extractHex(
     instrList: list,
     filePointer: TextIOWrapper,
-    output_name: str | None = None
+    output_name: str | None = None,
+    endian: str = "little"
 ):
     '''
     Extract the raw machine code of specific instructions to a hexdump file.
 
-    Reads through the assembly file and writes the little-endian bytes of
-    each matching instruction's opcode, one instruction per line, in the
-    same file order as extractInstr(). objdump prints each opcode in
-    human-reading order (e.g. "00000513"); this converts it to the
-    little-endian memory byte order (e.g. "13 05 00 00") used by disasm.sh's
-    own <name>.mem, so the two stay consistent. A line has 4 bytes for a
-    32-bit instruction or 2 bytes for a 16-bit compressed (RVC) one, so
-    lines are not fixed-width -- each carries exactly the instruction's
-    real encoded size. A compressed line or a Zihpm hpmcounter CSR
-    access is matched against its real resolved mnemonic, same as
-    get_asmInstr() -- see resolve_compressed_mnemonic()/
+    Reads through the assembly file and writes the bytes of each matching
+    instruction's opcode, one instruction per line, in the same file
+    order as extractInstr(). objdump prints each opcode in human-reading
+    order (e.g. "00000513"); with the default endian="little" this is
+    converted to the little-endian memory byte order (e.g. "13 05 00 00")
+    used by disasm.sh's own <name>.mem, so the two stay consistent.
+    endian="big" instead writes objdump's printed byte order unchanged
+    (e.g. "00 00 05 13") -- unlike disasm.sh's raw-binary hexdump, this is
+    always well-defined here even for a compressed (RVC) instruction,
+    since each opcode's real width (2 or 4 bytes) is already known from
+    objdump's own decoding, not guessed from a fixed word size. A line
+    has 4 bytes for a 32-bit instruction or 2 bytes for a 16-bit
+    compressed one, so lines are not fixed-width -- each carries exactly
+    the instruction's real encoded size. A compressed line or a Zihpm
+    hpmcounter CSR access is matched against its real resolved mnemonic,
+    same as get_asmInstr() -- see resolve_compressed_mnemonic()/
     resolve_zihpm_mnemonic().
 
     :param instrList: List of instruction mnemonics to extract
@@ -910,6 +928,9 @@ def extractHex(
     :type filePointer: TextIOWrapper
     :param output_name: Base name for the output file (optional)
     :type output_name: str | None
+    :param endian: Byte order to write each opcode in, "little"
+                   (default) or "big"
+    :type endian: str
     '''
     fileName = "extraction.mem"
     if output_name is not None:
@@ -944,9 +965,12 @@ def extractHex(
                     matchInstr = resolve_inx_mnemonic(matchInstr, operands)
 
             if is_valid_opcode and matchInstr in instrList:
-                beBytes = bytes.fromhex(opcode)
-                leBytes = beBytes[::-1]
-                fp.write(' '.join(f'{b:02x}' for b in leBytes) + '\n')
+                opcodeBytes = bytes.fromhex(opcode)
+                if endian == "little":
+                    opcodeBytes = opcodeBytes[::-1]
+                fp.write(
+                    ' '.join(f'{b:02x}' for b in opcodeBytes) + '\n'
+                )
                 written += 1
 
     fp.close()
@@ -1046,6 +1070,13 @@ def main():
             'or -es/--extract-set'
         )
 
+    # -endian only makes sense alongside -eh; "little" is also the
+    # default, so an explicit "big" is the only value worth warning about
+    if args.endian == "big" and not args.extract_hex:
+        logger.warning(
+            '-endian/--endian has no effect without -eh/--extract-hex'
+        )
+
     # write the extracted instructions (.asm) and, with -eh, their
     # hexdump (.mem)
     if extractionRequested:
@@ -1057,7 +1088,7 @@ def main():
 
         extractInstr(iList, filePointer, output_name)
         if args.extract_hex:
-            extractHex(iList, filePointer, output_name)
+            extractHex(iList, filePointer, output_name, args.endian)
     filePointer.close()
 
     # -isa-csv: categorize instructions by ISA extension and save the counts

@@ -55,6 +55,8 @@ Disassembly of section .text:
   a8:	06e67553          	fadd.q	a0,a2,a4
   ac:	04c5f553          	fadd.h	a0,a1,a2
   b0:	4485f553          	fcvt.bf16.s	fa0,fa1
+  b4:	00000073          	ecall
+  b8:	0ff0000f          	fence
 
 
 

@@ -1,5 +1,5 @@
 # Author:  Nikolaos Kostakis
-# Version: 1.1
+# Version: 1.3
 #
 # Usage:
 #   make ELF=path/to/test1.out [NAME=name]          # full pipeline: disasm + profiler
@@ -15,6 +15,7 @@ OUT_DIR        := out
 ELF            ?=
 NAME           ?=
 DEST           ?=
+DISASM_FLAGS   ?=
 PROFILER_FLAGS ?= -isa-csv
 
 NAME_FLAG := $(if $(NAME),-o $(NAME))
@@ -60,12 +61,16 @@ help:
 	@echo "  NAME            Output base name shared by both tools (optional)"
 	@echo "  ASM             Input .asm file for Profiler (optional; default: out/<NAME or ELF>.asm)"
 	@echo "  DEST            Destination directory to copy output files to (optional; default: no copy)"
+	@echo "  DISASM_FLAGS    Flags passed to Disassembler, e.g. -endian big (default: none)"
 	@echo "  PROFILER_FLAGS  Flags passed to Profiler (default: -isa-csv)"
 	@echo ""
-	@echo "Disassembler options (run directly, e.g. src/disasm.sh -h):"
-	@echo "  -h, --help     Show usage and exit"
-	@echo "  -v, --version  Print the tool's version and exit"
-	@echo "  -c, --check    Check required tools are on PATH and exit"
+	@echo "Disassembler options (DISASM_FLAGS, or run directly, e.g. src/disasm.sh -h):"
+	@echo "  -h, --help          Show usage and exit"
+	@echo "  -v, --version       Print the tool's version and exit"
+	@echo "  -c, --check         Check required tools are on PATH and exit"
+	@echo "  -endian little|big  Byte order for the .mem hex dump (default: little)"
+	@echo "                      big only makes sense for a binary with no compressed"
+	@echo "                      (RVC) instructions -- warns if the ELF reports C/Zca"
 	@echo ""
 	@echo "PROFILER_FLAGS options (isa_profiler.py):"
 	@echo "  -h, --help                   Show usage and exit"
@@ -76,8 +81,11 @@ help:
 	@echo "  -es, --extract-set S1 S2 ..  Extract ISA sets/subsets, e.g. rv32I, rv32I_loads, rv32A"
 	@echo "  -eh, --extract-hex           Write a hexdump of the extracted instructions"
 	@echo "                               Works in conjunction with -e/--extract or -es/--extract-set"
+	@echo "  -endian little|big           Byte order for -eh's hex dump (default: little)"
+	@echo "                               Works in conjunction with -eh/--extract-hex"
 	@echo "  -list-sets                   Print the supported ISA sets/subsets and exit"
 	@echo "  -list-instr S1 S2 ..         Print instructions in the given set(s)/subset(s) and exit"
+	@echo "  -list-core C1 C2 ..          Print known ISA extensions for the given CPU core(s) and exit"
 	@echo "  -v, --version                Print tool's version and exit"
 	@echo ""
 
@@ -90,7 +98,7 @@ disasm:
 	@if [ -n "$(DEST)" ]; then \
 		find $(OUT_DIR) -mindepth 1 ! -name README.md -delete; \
 	fi
-	$(SRC_DIR)/disasm.sh $(ELF) $(NAME)
+	$(SRC_DIR)/disasm.sh $(ELF) $(NAME) $(DISASM_FLAGS)
 	@if [ -n "$(DEST)" ]; then \
 		mkdir -p "$(DEST)"; \
 		find $(OUT_DIR) -mindepth 1 ! -name README.md -exec cp -p {} "$(DEST)/" \; ; \
@@ -114,4 +122,4 @@ profiler:
 	fi
 
 clean:
-	rm -f $(OUT_DIR)/*.asm $(OUT_DIR)/*.csv
+	rm -f $(OUT_DIR)/*.asm $(OUT_DIR)/*.csv $(OUT_DIR)/*.mem

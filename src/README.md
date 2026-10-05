@@ -5,7 +5,7 @@
 Disassembles a RISC-V ELF file into a readable `.asm` and generates a byte-per-line hex dump.
 
 ```bash
-disasm.sh <elf_file> [output_name]
+disasm.sh <elf_file> [output_name] [-endian little|big]
 ```
 
 Runs `objdump -d` to produce `<output_name>.asm` (input for `isa_profiler.py`) and `objcopy` + `hexdump` to produce `<output_name>.mem` (for Verilog's `$readmemh`). Both are written to `out/`. `output_name` defaults to the ELF file's basename. Verifies `<elf_file>` is actually a RISC-V ELF (via `readelf -h`) before disassembling. Requires the `riscv32-unknown-elf` toolchain (`objdump`, `objcopy`, `readelf`) and `hexdump` on `PATH` — checked up front, with a clear error naming whatever's missing.
@@ -15,6 +15,7 @@ Runs `objdump -d` to produce `<output_name>.asm` (input for `isa_profiler.py`) a
 | `-h`, `--help` | Show usage and exit |
 | `-v`, `--version` | Print the tool's version and exit |
 | `-c`, `--check` | Check that the required tools are on `PATH` and exit, without needing an ELF file (`make check` runs this, then also verifies the Python version) |
+| `-endian little\|big` | Byte order for `<output_name>.mem`: `little` (default, the real RV32 memory layout) or `big`, a uniform 4-byte swap of the raw binary via `objcopy --reverse-bytes=4`. This only produces a correct result for a binary with no compressed (RVC) instructions in it — the swap has no notion of real instruction boundaries, so it corrupts a 16-bit compressed instruction that straddles a swapped 4-byte group instead of genuinely byte-swapping it. `disasm.sh` checks the ELF's own `Tag_RISCV_arch` attribute (via `readelf -A`) and prints a warning (but still proceeds) if it reports `C` or `Zca`; also errors out cleanly, without writing a `.mem`, if the binary's size isn't a multiple of 4 |
 
 ## isa_profiler.py
 
@@ -33,7 +34,8 @@ python isa_profiler.py <input_file> [options]
 | `-isa-csv` | Save per-ISA-extension instruction counts to CSV |
 | `-e`, `--extract` | Instruction mnemonics to extract to a separate `.asm` file |
 | `-es`, `--extract-set` | ISA sets/subsets to extract, e.g. `rv32I`, `rv32I_loads`, `rv32A` (combinable with `-e`) |
-| `-eh`, `--extract-hex` | With `-e`/`-es`: also write a hexdump of the extracted instructions, one per line, little-endian (4 bytes for a 32-bit instruction, 2 for a compressed one). Warns and does nothing if used without `-e`/`-es` |
+| `-eh`, `--extract-hex` | With `-e`/`-es`: also write a hexdump of the extracted instructions, one per line (4 bytes for a 32-bit instruction, 2 for a compressed one). Warns and does nothing if used without `-e`/`-es` |
+| `-endian`, `--endian` | Byte order for `-eh`'s hexdump: `little` (default, the real RV32 memory byte order) or `big` (objdump's own printed byte order, left unreversed). Unlike `disasm.sh`'s version of this flag, always correct here regardless of compressed instructions, since each opcode's real width (2 or 4 bytes) comes straight from objdump's own decoding, not guessed from a fixed word size. Warns and does nothing if used without `-eh` |
 | `-list-sets` | Print the known ISA sets/subsets and exit; `input_file` not required |
 | `-list-instr` | Print the instruction mnemonics in the given set(s)/subset(s), one per line, and exit; `input_file` not required |
 | `-list-core` | Print the known ISA extensions for the given CPU core(s) and exit; `input_file` not required |
@@ -47,9 +49,11 @@ Names are case-insensitive. A whole set (e.g. `rv32I`) expands to all of its sub
 
 Compressed (RVC) instructions have no mnemonic of their own in real disassembly — objdump always prints the base/pseudo-op alias instead (e.g. `c.li` prints as `li`), so `isa_profiler.py` resolves the alias back to its real name before counting. Most resolve by simple prefixing; a handful are ambiguous by mnemonic text alone and need the operand text too. See `resolve_compressed_mnemonic()`'s comment in `isa_profiler.py` for exactly which ones and why.
 
+Every subset's real RISC-V manual chapter/section and the extension's own ratified version are cited directly above it in `isa_rv32.py` (checked against the actual spec documents, not from memory) — not repeated here, to avoid the same fact drifting out of sync in two places.
+
 | Set | Subsets |
 | --- | --- |
-| `rv32I` | `rv32I_logic`, `rv32I_addsub`, `rv32I_shifts`, `rv32I_comparisons`, `rv32I_jumps`, `rv32I_branches`, `rv32I_loads`, `rv32I_stores`, `rv32I_other` |
+| `rv32I` | `rv32I_logic`, `rv32I_addsub`, `rv32I_shifts`, `rv32I_comparisons`, `rv32I_jumps`, `rv32I_branches`, `rv32I_loads`, `rv32I_stores`, `rv32I_upper_imm` (`lui`/`auipc` -- the ISA manual's sec. 1.1.4.1 groups them with `addi`/`andi`/etc. by encoding format, but they don't share an operation with any other `rv32I_*` subset here, hence their own), `rv32I_fence`, `rv32I_env` (`ecall`/`ebreak`) |
 | `rv32M` | `rv32M_mul`, `rv32M_div`, `rv32M_rem` |
 | `rv32A` | — |
 | `rv32F` | — |

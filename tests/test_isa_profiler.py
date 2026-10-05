@@ -68,16 +68,24 @@ EXPECTED_INSTRUCTIONS = {
 # e16 for vfwcvtbf16.f.f.v/vfncvtbf16.f.f.w (Zvfbfmin) and
 # vfwmaccbf16.vv (Zvfbfwma) -- their mnemonics carry "bf16" directly,
 # so unlike the .inx lines they need no resolver, just their own table
-# entries; "vsetvli" therefore counts 2, not 1.
+# entries; "vsetvli" therefore counts 2, not 1. "auipc" (line 18)
+# gives rv32I_upper_imm real coverage, not rv32I_loads -- lui/auipc
+# are the only two U-type RV32I instructions (see rv32I_upper_imm's
+# comment in isa_rv32.py), a separate subset from the real loads and
+# the li/la pseudo-ops they happen to expand to. "ecall"/"fence" give
+# rv32I_env/rv32I_fence real coverage -- these two used to be folded
+# into one catch-all "rv32I_other" subset together with lui/auipc,
+# now split three ways with nothing left over.
 EXPECTED_COMPLEX_INSTRUCTIONS = {
     "add": 1, "amoadd.w": 1, "and": 2, "andn": 1, "auipc": 1,
     "bext": 1, "bne": 1, "c.and": 1, "c.beqz": 1, "c.fld": 1,
     "c.flw": 1, "c.jr": 1, "c.li": 1, "c.lw": 1, "c.swsp": 1,
     "c.zext.b": 1, "clmul": 1, "clz": 1, "cm.jt": 1, "cm.push": 1,
-    "csrrw": 1, "czero.eqz": 1, "div": 1, "fadd.d": 1, "fadd.d.inx": 1,
-    "fadd.h": 1, "fadd.h.inx": 1, "fadd.q": 1, "fadd.q.inx": 1,
-    "fadd.s": 1, "fadd.s.inx": 1, "fcvt.bf16.s": 1, "fence.i": 1,
-    "fminm.s": 1, "fmul.s": 1, "jal": 1, "lb": 1, "lr.w": 1, "min": 1,
+    "csrrw": 1, "czero.eqz": 1, "div": 1, "ecall": 1, "fadd.d": 1,
+    "fadd.d.inx": 1, "fadd.h": 1, "fadd.h.inx": 1, "fadd.q": 1,
+    "fadd.q.inx": 1, "fadd.s": 1, "fadd.s.inx": 1, "fcvt.bf16.s": 1,
+    "fence": 1, "fence.i": 1, "fminm.s": 1, "fmul.s": 1, "jal": 1,
+    "lb": 1, "lr.w": 1, "min": 1,
     "mul": 2, "pack": 1, "rdcycle": 1, "rdhpmcounter3": 1, "rem": 1,
     "reserved0": 1, "sb": 1, "sh1add": 1, "slli": 1, "slt": 1,
     "vadd.vv": 1, "vfncvtbf16.f.f.w": 1, "vfwcvtbf16.f.f.v": 1,
@@ -629,6 +637,41 @@ class TestExtractHex(unittest.TestCase):
         finally:
             cleanup(name, f"{name}_compressed")
 
+    def test_default_endian_is_little(self):
+        # endian isn't passed at all -- must match explicit "little"
+        name = "unittest_hexconv_default_tmp"
+        try:
+            with open(FIXTURE) as fp:
+                ip.extractHex(["srli"], fp, name)
+            content = (OUT_DIR / f"{name}.mem").read_text().strip()
+            self.assertEqual(content, "13 d7 17 00")
+        finally:
+            cleanup(name)
+
+    def test_big_endian_leaves_objdump_byte_order_unchanged(self):
+        # srli a4,a5,0x1 -> opcode 0017d713 -> objdump's own printed
+        # order, not reversed
+        name = "unittest_hexconv_big_tmp"
+        try:
+            with open(FIXTURE) as fp:
+                ip.extractHex(["srli"], fp, name, endian="big")
+            content = (OUT_DIR / f"{name}.mem").read_text().strip()
+            self.assertEqual(content, "00 17 d7 13")
+        finally:
+            cleanup(name)
+
+    def test_big_endian_compressed_opcode_two_bytes_unreversed(self):
+        # c.li's 4501 opcode, endian="big" -> "45 01" (unreversed),
+        # vs. little's "01 45" -- still exactly 2 bytes either way
+        name = "unittest_hexconv_big_compressed_tmp"
+        try:
+            with open(FIXTURE) as fp:
+                ip.extractHex(["c.li"], fp, name, endian="big")
+            content = (OUT_DIR / f"{name}.mem").read_text().strip()
+            self.assertEqual(content, "45 01")
+        finally:
+            cleanup(name)
+
 
 class TestComplexFixture(unittest.TestCase):
     '''
@@ -657,7 +700,8 @@ class TestComplexFixture(unittest.TestCase):
         expected_nonzero = [
             "rv32I_logic", "rv32I_addsub", "rv32I_shifts",
             "rv32I_comparisons", "rv32I_jumps", "rv32I_branches",
-            "rv32I_loads", "rv32I_stores", "rv32I_other",
+            "rv32I_loads", "rv32I_stores", "rv32I_upper_imm",
+            "rv32I_fence", "rv32I_env",
             "rv32M_mul", "rv32M_div", "rv32M_rem",
             "rv32A", "rv32F", "rv32D", "rv32Q",
             "zba", "zbb", "zbc", "zbs", "zbkb", "zbkx",
@@ -745,6 +789,34 @@ class TestCli(unittest.TestCase):
             result = self.run_cli([str(FIXTURE), "-eh", "-o", name])
             self.assertEqual(result.returncode, 0)
             self.assertIn("no effect", result.stderr)
+        finally:
+            cleanup(name)
+
+    def test_endian_without_eh_warns(self):
+        name = "unittest_cli_endian_tmp"
+        try:
+            result = self.run_cli(
+                [str(FIXTURE), "-e", "li", "-endian", "big", "-o", name]
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("no effect", result.stderr)
+        finally:
+            cleanup(name)
+
+    def test_endian_rejects_unknown_value(self):
+        result = self.run_cli([str(FIXTURE), "-endian", "middle"])
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_endian_big_reflected_in_hexdump(self):
+        name = "unittest_cli_endian_big_tmp"
+        try:
+            result = self.run_cli([
+                str(FIXTURE), "-e", "srli", "-eh", "-endian", "big",
+                "-o", name
+            ])
+            self.assertEqual(result.returncode, 0)
+            content = (OUT_DIR / f"{name}.mem").read_text().strip()
+            self.assertEqual(content, "00 17 d7 13")
         finally:
             cleanup(name)
 

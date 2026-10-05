@@ -28,16 +28,16 @@ make clean                                      # remove generated files from ou
 make help                                       # describe targets and variables
 ```
 
-`NAME` is optional and shared across both steps (`-o` for `isa_profiler.py`, second argument to `disasm.sh`); omit it and each tool falls back to its own default naming. `PROFILER_FLAGS` (default `-isa-csv`) controls which `isa_profiler.py` flags run, e.g. `make ELF=... PROFILER_FLAGS="-csv -isa-csv"`.
+`NAME` is optional and shared across both steps (`-o` for `isa_profiler.py`, second argument to `disasm.sh`); omit it and each tool falls back to its own default naming. `PROFILER_FLAGS` (default `-isa-csv`) controls which `isa_profiler.py` flags run, e.g. `make ELF=... PROFILER_FLAGS="-csv -isa-csv"`. `DISASM_FLAGS` (default none) similarly controls which `disasm.sh` flags run alongside `ELF`/`NAME`, e.g. `make ELF=... DISASM_FLAGS="-endian big"`.
 
-`disasm` and `all` only forward `ELF`/`NAME` to `disasm.sh` — there's no `DISASM_FLAGS` passthrough. `disasm.sh`'s own flags (`-h`/`--help`, `-v`/`--version`, `-c`/`--check`) are run directly instead; `make check` runs `disasm.sh --check` and then also verifies `$(PYTHON)` (default `python3`) is 3.10+, since `isa_profiler.py` requires it.
+`disasm.sh`'s own mode flags (`-h`/`--help`, `-v`/`--version`, `-c`/`--check`) aren't part of `DISASM_FLAGS` — they're run directly instead, e.g. `src/disasm.sh --check`; `make check` runs that and then also verifies `$(PYTHON)` (default `python3`) is 3.10+, since `isa_profiler.py` requires it.
 
 `DEST`, if set, also copies whatever files a target newly wrote to `out/` into that directory (created if missing), e.g. `make ELF=... DEST=/tmp/results`. Both tools still always write to `out/` first — `DEST` is an additional copy, not a redirect, since the underlying tools aren't configurable that way.
 
 ### Directly
 
 ```bash
-src/disasm.sh <elf_file> [output_name]  # or -h/--help, -v/--version, -c/--check
+src/disasm.sh <elf_file> [output_name] [-endian little|big]  # or -h/--help, -v/--version, -c/--check
 python src/isa_profiler.py <input_file> [options]  # or -h/--help, -v/--version
 ```
 
@@ -52,7 +52,8 @@ python src/isa_profiler.py <input_file> [options]  # or -h/--help, -v/--version
 | `-isa-csv` | Save per-ISA-extension instruction counts to a CSV file |
 | `-e`, `--extract` | One or more instruction mnemonics to extract to `<output_name>.asm` (or `extraction.asm` if `-o` is not given) |
 | `-es`, `--extract-set` | One or more ISA sets/subsets to extract (e.g. `rv32I`, `rv32I_loads`, `rv32A`), combinable with `-e`; case-insensitive, matches an exact set/subset or a whole set's subsets by prefix |
-| `-eh`, `--extract-hex` | With `-e`/`-es`: also write `<output_name>.mem`, one extracted instruction's raw bytes per line (little-endian; 4 bytes for a 32-bit instruction, 2 for a compressed one), in the same order as the `.asm` extraction. Warns and does nothing if used without `-e`/`-es` |
+| `-eh`, `--extract-hex` | With `-e`/`-es`: also write `<output_name>.mem`, one extracted instruction's raw bytes per line (4 bytes for a 32-bit instruction, 2 for a compressed one), in the same order as the `.asm` extraction. Warns and does nothing if used without `-e`/`-es` |
+| `-endian` | Byte order for `-eh`'s hexdump: `little` (default, real RV32 memory order) or `big` (objdump's own printed byte order, unreversed). Always correct either way, even for a compressed instruction, since each opcode's real width is already known. Warns and does nothing without `-eh` |
 | `-list-sets` | Print the known ISA sets/subsets and exit, with subsets tab-indented beneath their whole set (`input_file` not required) |
 | `-list-instr` | One or more ISA sets/subsets; print the instruction mnemonics they contain (one per line) and exit — same resolution as `-es` (whole-set expansion, case-insensitive, deduplicated), but a static lookup, not filtered by any file (`input_file` not required) |
 | `-list-core` | One or more CPU core names (e.g. `cv32e40p`, `cv32e40x`); print the RISC-V ISA extensions each is known to support and exit — reference data from each core's own user manual, not derived from disassembly (`input_file` not required) |
@@ -88,6 +89,18 @@ Extract all `lw` and `sw` instructions to `out/extraction.asm`:
 
 ```bash
 python src/isa_profiler.py out/test1.asm -e lw sw
+```
+
+Also write their raw bytes (little-endian, the default) to `out/extraction.mem`:
+
+```bash
+python src/isa_profiler.py out/test1.asm -e lw sw -eh
+```
+
+Same, but big-endian:
+
+```bash
+python src/isa_profiler.py out/test1.asm -e lw sw -eh -endian big
 ```
 
 Extract every RV32I instruction (all of its subsets) plus the RV32A extension:
@@ -141,11 +154,11 @@ A line is only treated as an instruction if it has more than two whitespace-sepa
 All generated files are written to `out/`.
 
 - **`<output_name>.asm`** (or `<elf_basename>.asm` by default) — readable disassembly, from `disasm.sh`.
-- **`<output_name>.mem`** — byte-per-line hex dump for use with Verilog's `$readmemh`, from `disasm.sh`.
+- **`<output_name>.mem`** — byte-per-line hex dump for use with Verilog's `$readmemh`, from `disasm.sh`. Little-endian by default (the real RV32 memory layout); `-endian big` does a uniform 4-byte swap instead — only meaningful for a binary with no compressed (RVC) instructions, since the swap has no notion of real instruction boundaries. A warning is printed if the ELF reports the C/Zca extension.
 - **`<output_name>.csv`** (or `instructions.csv` by default) — two rows: instruction mnemonics and their counts, written when `-csv` is passed to `isa_profiler.py`.
 - **`<output_name>_isa_sets.csv`** (or `isa_sets.csv` by default) — two rows: ISA extension/unknown-instruction names and their counts, written when `-isa-csv` is passed. Instructions that don't match a known ISA set are listed individually under an `unknown_` prefix.
 - **`<output_name>.asm`** (or `extraction.asm` by default) — lines containing the requested instructions (via `-e`/`--extract`), one per line.
-- **`<output_name>.mem`** (or `extraction.mem` by default) — one extracted instruction's raw bytes per line, little-endian (4 bytes for a 32-bit instruction, 2 for a 16-bit compressed one), written when `-eh`/`--extract-hex` is passed alongside `-e`/`-es`. Note this shares its default naming pattern with `disasm.sh`'s own `<output_name>.mem` above — use distinct `-o`/`NAME` values (or separate `DEST` folders) to avoid overwriting one with the other.
+- **`<output_name>.mem`** (or `extraction.mem` by default) — one extracted instruction's raw bytes per line (4 bytes for a 32-bit instruction, 2 for a 16-bit compressed one), written when `-eh`/`--extract-hex` is passed alongside `-e`/`-es`. Little-endian by default; `-endian big` writes objdump's own printed byte order instead, unreversed — always correct here, unlike `disasm.sh`'s version, since each opcode's real width is already known. Note this shares its default naming pattern with `disasm.sh`'s own `<output_name>.mem` above — use distinct `-o`/`NAME` values (or separate `DEST` folders) to avoid overwriting one with the other.
 
 ## License
 
